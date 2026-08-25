@@ -8,7 +8,7 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import ATTR_ENTITY_ID, Platform
+from homeassistant.const import ATTR_ENTITY_ID, CONF_DEVICE_ID, Platform
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv, entity_registry as er
@@ -25,6 +25,7 @@ from .const import (
 )
 from .controller import EcovacsController
 from .frontend import async_register_frontend_card
+from .util import generate_client_device_id
 
 PLATFORMS = [
     Platform.BUTTON,
@@ -74,6 +75,16 @@ DEBUG_CAPTURE_EXPORT_SCHEMA = vol.Schema(
         vol.Optional("session_id"): cv.string,
     }
 )
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Migrate old config entries to persist a stable client device id."""
+    if entry.version == 1 and entry.minor_version < 2:
+        data = dict(entry.data)
+        if CONF_DEVICE_ID not in data:
+            data[CONF_DEVICE_ID] = generate_client_device_id()
+        hass.config_entries.async_update_entry(entry, data=data, minor_version=2)
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: EcovacsConfigEntry) -> bool:

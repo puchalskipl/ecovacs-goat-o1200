@@ -1,6 +1,10 @@
 """Ecovacs mower constants."""
 
 DOMAIN = "ecovacs_goat_g1"
+
+CONF_ACCOUNT_UID = "account_uid"
+CONF_ACCESS_TOKEN = "access_token"
+CONF_VERIFICATION_CODE = "verification_code"
 SERVICE_REFRESH_STATE = "refresh_state"
 SERVICE_REQUEST_LIVE_POSITION_STREAM = "request_live_position_stream"
 SERVICE_START_DEBUG_CAPTURE = "start_debug_capture"
