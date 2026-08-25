@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 from dataclasses import replace
 import logging
@@ -9,12 +10,21 @@ from pathlib import Path
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_COUNTRY, CONF_NAME, CONF_PASSWORD, CONF_USERNAME
+from homeassistant.const import (
+    CONF_COUNTRY,
+    CONF_DEVICE_ID,
+    CONF_NAME,
+    CONF_PASSWORD,
+    CONF_USERNAME,
+)
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryError, ConfigEntryNotReady
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import aiohttp_client
 
 from .const import (
+    CONF_ACCESS_TOKEN,
+    CONF_ACCOUNT_UID,
+    CONF_SESSION_STORE_ID,
     DEFAULT_DEBUG_CAPTURE_MAX_DURATION_MINUTES,
     DEFAULT_DEBUG_CAPTURE_MAX_SIZE_MB,
     DEFAULT_DEBUG_CAPTURE_RAW_PAYLOADS,
@@ -23,9 +33,15 @@ from .const import (
     OPTION_DEBUG_CAPTURE_RAW_PAYLOADS,
 )
 from .debug_capture import DebugCaptureStore
-from .mower_api import EcovacsAuthError, EcovacsMowerApi
+from .mower_api import (
+    AccountSession,
+    DeviceVerificationRequiredError,
+    EcovacsAuthError,
+    EcovacsMowerApi,
+)
 from .mower_coordinator import MowerCoordinator
-from .util import get_client_device_id
+from .session_store import AccountSessionStore
+from .util import get_client_device_id, get_session_store_id
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -36,36 +52,62 @@ class EcovacsController:
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         """Initialize controller."""
         self._hass = hass
+        self._entry = entry
         config: Mapping[str, Any] = entry.data
+        self._config = config
         self._configured_name = str(config.get(CONF_NAME) or "Ecovacs-GOAT")
         self._debug_capture = DebugCaptureStore(
             Path(hass.config.path("ecovacs_goat_g1_debug")),
             Path(hass.config.path("www", "ecovacs_goat", "debug")),
         )
         self._configure_debug_capture(entry.options)
+        self._device_id = get_client_device_id(config)
+        self._store_id = get_session_store_id(config)
+        self._session_store = AccountSessionStore(
+            hass,
+            self._store_id,
+            self._device_id,
+            str(config[CONF_USERNAME]),
+            str(config[CONF_COUNTRY]),
+        )
         for value in (
             config.get(CONF_USERNAME),
             config.get(CONF_PASSWORD),
             self._configured_name,
-            get_client_device_id(hass),
+            self._device_id,
         ):
             self._debug_capture.add_redaction_value(value)
-        self._api = EcovacsMowerApi(
-            aiohttp_client.async_get_clientsession(hass),
-            username=config[CONF_USERNAME],
-            password=config[CONF_PASSWORD],
-            country=config[CONF_COUNTRY],
-            device_id=get_client_device_id(hass),
-            debug_capture=self._debug_capture,
-        )
+        self._api: EcovacsMowerApi | None = None
         self._coordinators: list[MowerCoordinator] = []
+        self._accept_session_updates = True
+        self._session_write_lock = asyncio.Lock()
 
     async def initialize(self) -> None:
         """Initialize mower devices and coordinators."""
         started: list[MowerCoordinator] = []
         try:
-            await self._api.authenticate()
-            devices = await self._api.get_devices()
+            legacy_session = self._legacy_session_from_entry()
+            account_session = await self._session_store.async_load()
+            if account_session is None:
+                account_session = legacy_session
+            if account_session is not None:
+                self._add_session_redactions(account_session)
+            if legacy_session is not None and account_session is legacy_session:
+                await self._session_store.async_save(legacy_session)
+            self._persist_identifiers()
+            api = EcovacsMowerApi(
+                aiohttp_client.async_get_clientsession(self._hass),
+                username=self._config[CONF_USERNAME],
+                password=self._config[CONF_PASSWORD],
+                country=self._config[CONF_COUNTRY],
+                device_id=self._device_id,
+                account_session=account_session,
+                account_session_update_callback=self._async_account_session_updated,
+                debug_capture=self._debug_capture,
+            )
+            self._api = api
+            await api.authenticate()
+            devices = await api.get_devices()
             if not devices:
                 raise ConfigEntryNotReady("No ECOVACS mower devices found")
 
@@ -81,7 +123,7 @@ class EcovacsController:
                     self._debug_capture.add_redaction_value(value)
                 coordinator = MowerCoordinator(
                     self._hass,
-                    self._api,
+                    api,
                     device,
                     self._debug_capture,
                 )
@@ -89,8 +131,12 @@ class EcovacsController:
                 started.append(coordinator)
                 _LOGGER.info("Initialized ECOVACS mower %s", device.name)
             self._coordinators = started
+        except DeviceVerificationRequiredError as ex:
+            raise ConfigEntryAuthFailed(
+                "ECOVACS device verification required"
+            ) from ex
         except EcovacsAuthError as ex:
-            raise ConfigEntryError("Invalid ECOVACS credentials") from ex
+            raise ConfigEntryAuthFailed("Invalid ECOVACS credentials") from ex
         except ConfigEntryNotReady:
             await self._stop_coordinators(started)
             raise
@@ -100,8 +146,48 @@ class EcovacsController:
 
     async def teardown(self) -> None:
         """Disconnect controller."""
+        self._accept_session_updates = False
+        async with self._session_write_lock:
+            pass
         await self._stop_coordinators(self._coordinators)
         self._coordinators.clear()
+
+    async def _async_account_session_updated(
+        self, account_session: AccountSession | None
+    ) -> None:
+        """Persist session rotations and definitive invalidation privately."""
+        async with self._session_write_lock:
+            if not self._accept_session_updates:
+                return
+            if account_session is not None:
+                self._add_session_redactions(account_session)
+            await self._session_store.async_save(account_session)
+
+    def _add_session_redactions(self, account_session: AccountSession) -> None:
+        """Ensure raw account credentials never appear in debug captures."""
+        self._debug_capture.add_redaction_value(account_session.user_id)
+        self._debug_capture.add_redaction_value(account_session.access_token)
+
+    def _legacy_session_from_entry(self) -> AccountSession | None:
+        """Move tokens written by 1.0.0b1 out of the config entry."""
+        user_id = self._config.get(CONF_ACCOUNT_UID)
+        access_token = self._config.get(CONF_ACCESS_TOKEN)
+        if not user_id or not access_token:
+            return None
+        return AccountSession(user_id=str(user_id), access_token=str(access_token))
+
+    def _persist_identifiers(self) -> None:
+        """Keep device and store ids on the entry; drop leftover tokens."""
+        new_data = {
+            key: value
+            for key, value in dict(self._entry.data).items()
+            if key not in {CONF_ACCOUNT_UID, CONF_ACCESS_TOKEN}
+        }
+        new_data[CONF_DEVICE_ID] = self._device_id
+        new_data[CONF_SESSION_STORE_ID] = self._store_id
+        if new_data != dict(self._entry.data):
+            self._hass.config_entries.async_update_entry(self._entry, data=new_data)
+            self._config = new_data
 
     async def _stop_coordinators(
         self, coordinators: list[MowerCoordinator]

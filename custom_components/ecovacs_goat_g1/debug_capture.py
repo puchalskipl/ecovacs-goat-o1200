@@ -18,6 +18,8 @@ DEFAULT_RETAINED_SESSIONS = 3
 REDACTED = "<redacted>"
 REDACT_KEYS = {
     "accessToken",
+    "access_token",
+    "account_uid",
     "auth",
     "authCode",
     "authorization",
@@ -29,8 +31,10 @@ REDACT_KEYS = {
     "nick",
     "password",
     "resource",
+    "session_store_id",
     "token",
     "uid",
+    "user_id",
     "userId",
     "userid",
 }

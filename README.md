@@ -64,7 +64,7 @@ Until this is available as a default HACS repository, add it manually:
 
 ### Testing pre-release (beta) builds
 
-Experimental builds — for example new model support being validated with a tester — are **automatically published as pre-releases** from the development branch (each push produces an incrementing beta such as `0.2.0b1`, `0.2.0b2`). To install one in HACS:
+Experimental builds — for example new model support being validated with a tester — are **automatically published as pre-releases** from the development branch (each push produces an incrementing beta such as `0.2.0b1`, `0.2.0b2`; only the latest beta is kept, and the line auto-advances after each stable release). See [CONTRIBUTING.md](CONTRIBUTING.md#releases--versioning) for the full release flow. To install one in HACS:
 
 1. Open **Ecovacs GOAT G1** in HACS.
 2. Three-dot menu -> **Redownload**.
@@ -78,6 +78,8 @@ To return to a stable build later, redownload and pick the latest non-beta versi
 You need your ECOVACS account username, password, and country. The integration uses the ECOVACS cloud, just like the official app.
 
 During setup, choose a Home Assistant device name. A generated default such as `Ecovacs-GOAT-1` is provided.
+
+ECOVACS now requires a one-time **email device verification** for Home Assistant. After you submit your account details, check the email inbox for that ECOVACS account, enter the code, and keep using the same Home Assistant instance. The integration stores a stable client device id and keeps the verified account session in a **private Home Assistant store** (not in the config entry). Later startups reuse and rotate that session with `checkLogin`, so they do not password-login again. If the integration later asks you to reauthenticate, confirm the password and enter a fresh email code. You can also start that login yourself from **Settings → Devices & services → Ecovacs GOAT G1 → Configure → Re-authenticate account**.
 
 ## Optional Dashboard Card
 

@@ -8,12 +8,13 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import ATTR_ENTITY_ID, Platform
+from homeassistant.const import ATTR_ENTITY_ID, CONF_DEVICE_ID, Platform
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv, entity_registry as er
 
 from .const import (
+    CONF_SESSION_STORE_ID,
     DOMAIN,
     SERVICE_CLEAR_DEBUG_CAPTURE,
     SERVICE_EXPORT_DEBUG_CAPTURE,
@@ -25,6 +26,8 @@ from .const import (
 )
 from .controller import EcovacsController
 from .frontend import async_register_frontend_card
+from .session_store import async_remove_account_session_store
+from .util import generate_client_device_id, generate_session_store_id
 
 PLATFORMS = [
     Platform.BUTTON,
@@ -76,14 +79,36 @@ DEBUG_CAPTURE_EXPORT_SCHEMA = vol.Schema(
 )
 
 
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Migrate old config entries to persist device and private-store ids."""
+    if entry.version != 1:
+        return True
+    if entry.minor_version >= 3:
+        return True
+    data = dict(entry.data)
+    if CONF_DEVICE_ID not in data:
+        data[CONF_DEVICE_ID] = generate_client_device_id()
+    if CONF_SESSION_STORE_ID not in data:
+        data[CONF_SESSION_STORE_ID] = generate_session_store_id()
+    hass.config_entries.async_update_entry(entry, data=data, minor_version=3)
+    return True
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: EcovacsConfigEntry) -> bool:
     """Set up this integration using UI."""
+    # Register the dashboard card first, before the (slow) controller
+    # initialization. Otherwise the card's static path is unavailable for the
+    # few seconds it takes to connect, and a frontend load during that window
+    # gets a 404 that the browser/service worker caches against the versioned
+    # URL, leaving the card stuck as "Custom element doesn't exist" until the
+    # cache is cleared.
+    await async_register_frontend_card(hass)
+
     controller = EcovacsController(hass, entry)
     await controller.initialize()
     entry.runtime_data = controller
 
     _async_register_services(hass)
-    await async_register_frontend_card(hass)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
@@ -94,6 +119,17 @@ async def async_unload_entry(hass: HomeAssistant, entry: EcovacsConfigEntry) -> 
     if unload_ok:
         await entry.runtime_data.teardown()
     return unload_ok
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: EcovacsConfigEntry) -> None:
+    """Delete the private account session when its config entry is removed."""
+    try:
+        if controller := getattr(entry, "runtime_data", None):
+            await controller.teardown()
+    finally:
+        await async_remove_account_session_store(
+            hass, entry.data.get(CONF_SESSION_STORE_ID)
+        )
 
 
 def _async_register_services(hass: HomeAssistant) -> None:
