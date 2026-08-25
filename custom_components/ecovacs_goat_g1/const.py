@@ -2,9 +2,12 @@
 
 DOMAIN = "ecovacs_goat_g1"
 
+CONF_SESSION_STORE_ID = "session_store_id"
+CONF_VERIFICATION_CODE = "verification_code"
+# Legacy keys written by 1.0.0b1; stripped on migrate to the private store.
 CONF_ACCOUNT_UID = "account_uid"
 CONF_ACCESS_TOKEN = "access_token"
-CONF_VERIFICATION_CODE = "verification_code"
+
 SERVICE_REFRESH_STATE = "refresh_state"
 SERVICE_REQUEST_LIVE_POSITION_STREAM = "request_live_position_stream"
 SERVICE_START_DEBUG_CAPTURE = "start_debug_capture"

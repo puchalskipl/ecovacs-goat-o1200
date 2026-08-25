@@ -33,8 +33,10 @@ repos:
           - auto
           # Workflows use official version tags (checkout@v5, hassfest@master).
           # Pinning every action to a SHA is a separate hardening task.
+          # Semgrep --exclude-rule is an exact id match; auto/registry ids
+          # repeat the last segment.
           - --exclude-rule
-          - yaml.github-actions.security.github-actions-mutable-action-tag
+          - yaml.github-actions.security.github-actions-mutable-action-tag.github-actions-mutable-action-tag
           - --error
           - --disable-version-check
           - --quiet

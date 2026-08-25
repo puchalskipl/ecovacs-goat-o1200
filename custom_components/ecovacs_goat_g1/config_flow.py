@@ -22,8 +22,7 @@ from homeassistant.helpers import aiohttp_client, selector
 from homeassistant.helpers.typing import VolDictType
 
 from .const import (
-    CONF_ACCESS_TOKEN,
-    CONF_ACCOUNT_UID,
+    CONF_SESSION_STORE_ID,
     CONF_VERIFICATION_CODE,
     DEFAULT_DEBUG_CAPTURE_MAX_DURATION_MINUTES,
     DEFAULT_DEBUG_CAPTURE_MAX_SIZE_MB,
@@ -34,37 +33,42 @@ from .const import (
     OPTION_DEBUG_CAPTURE_RAW_PAYLOADS,
 )
 from .mower_api import (
-    AccountTokens,
+    AccountSession,
     DeviceVerificationRequiredError,
     EcovacsApiError,
     EcovacsAuthError,
     EcovacsMowerApi,
     InvalidVerificationCodeError,
 )
-from .util import get_client_device_id
+from .session_store import AccountSessionStore, async_remove_account_session_store
+from .util import get_client_device_id, get_session_store_id
 
 _LOGGER = logging.getLogger(__name__)
 DEFAULT_NAME_PREFIX = "Ecovacs-GOAT"
 
 
-def _account_tokens_from_input(user_input: Mapping[str, Any]) -> AccountTokens | None:
-    """Return persisted account tokens when both values are present."""
-    user_id = user_input.get(CONF_ACCOUNT_UID)
-    access_token = user_input.get(CONF_ACCESS_TOKEN)
-    if user_id and access_token:
-        return AccountTokens(user_id=str(user_id), access_token=str(access_token))
-    return None
-
-
-def _create_api(hass: HomeAssistant, user_input: Mapping[str, Any]) -> EcovacsMowerApi:
+def _create_api(
+    hass: HomeAssistant,
+    user_input: Mapping[str, Any],
+    *,
+    store: AccountSessionStore | None = None,
+    account_session: AccountSession | None = None,
+) -> EcovacsMowerApi:
     """Create an API client for the current flow input."""
+
+    async def _persist(session: AccountSession | None) -> None:
+        if store is None:
+            return
+        await store.async_save(session)
+
     return EcovacsMowerApi(
         aiohttp_client.async_get_clientsession(hass),
         username=user_input[CONF_USERNAME],
         password=user_input[CONF_PASSWORD],
         country=user_input[CONF_COUNTRY],
         device_id=get_client_device_id(user_input),
-        account_tokens=_account_tokens_from_input(user_input),
+        account_session=account_session,
+        account_session_update_callback=_persist,
     )
 
 
@@ -94,41 +98,58 @@ class EcovacsConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Ecovacs."""
 
     VERSION = 1
-    MINOR_VERSION = 2
+    MINOR_VERSION = 3
 
     def __init__(self) -> None:
         """Initialize flow state."""
         self._input: dict[str, Any] = {}
         self._api: EcovacsMowerApi | None = None
+        self._session_store: AccountSessionStore | None = None
 
     @staticmethod
     def async_get_options_flow(config_entry: ConfigEntry) -> EcovacsOptionsFlow:
         """Create the options flow."""
-        return EcovacsOptionsFlow(config_entry)
+        return EcovacsOptionsFlow()
 
-    def _store_api(self, user_input: dict[str, Any]) -> EcovacsMowerApi:
-        """Create and remember the API client for later verification."""
+    def _bind_store(self, user_input: dict[str, Any]) -> AccountSessionStore:
+        """Create the private store for this flow's device and account."""
         user_input[CONF_DEVICE_ID] = get_client_device_id(user_input)
+        user_input[CONF_SESSION_STORE_ID] = get_session_store_id(user_input)
+        self._session_store = AccountSessionStore(
+            self.hass,
+            user_input[CONF_SESSION_STORE_ID],
+            user_input[CONF_DEVICE_ID],
+            str(user_input[CONF_USERNAME]),
+            str(user_input[CONF_COUNTRY]),
+        )
+        return self._session_store
+
+    async def _store_api(self, user_input: dict[str, Any]) -> EcovacsMowerApi:
+        """Create and remember the API client for later verification."""
+        store = self._bind_store(user_input)
+        session = await store.async_load()
         self._input = user_input
-        self._api = _create_api(self.hass, user_input)
+        self._api = _create_api(
+            self.hass, user_input, store=store, account_session=session
+        )
         return self._api
 
     def _entry_data(self) -> dict[str, Any]:
-        """Build config entry data, including verified tokens when present."""
-        data = {
+        """Build config entry data without account tokens."""
+        return {
             CONF_NAME: str(self._input[CONF_NAME]).strip(),
             CONF_USERNAME: self._input[CONF_USERNAME],
             CONF_PASSWORD: self._input[CONF_PASSWORD],
             CONF_COUNTRY: self._input[CONF_COUNTRY],
             CONF_DEVICE_ID: self._input[CONF_DEVICE_ID],
+            CONF_SESSION_STORE_ID: self._input[CONF_SESSION_STORE_ID],
         }
-        if self._api and self._api.account_tokens:
-            data[CONF_ACCOUNT_UID] = self._api.account_tokens.user_id
-            data[CONF_ACCESS_TOKEN] = self._api.account_tokens.access_token
-        return data
 
-    def _finish_flow(self) -> ConfigFlowResult:
-        """Create or update the config entry."""
+    async def _finish_flow(self) -> ConfigFlowResult:
+        """Persist the session privately, then create or update the entry."""
+        if self._session_store is not None and self._api is not None:
+            if self._api.account_session is not None:
+                await self._session_store.async_save_verified(self._api.account_session)
         data = self._entry_data()
         if self.source == SOURCE_REAUTH:
             return self.async_update_reload_and_abort(
@@ -168,7 +189,7 @@ class EcovacsConfigFlow(ConfigFlow, domain=DOMAIN):
             if not user_input[CONF_NAME]:
                 errors[CONF_NAME] = "invalid_name"
             else:
-                api = self._store_api(user_input)
+                api = await self._store_api(user_input)
                 try:
                     errors = await _login_and_list_devices(api)
                 except DeviceVerificationRequiredError:
@@ -176,7 +197,7 @@ class EcovacsConfigFlow(ConfigFlow, domain=DOMAIN):
                     if not errors:
                         return await self.async_step_device_verification()
                 if not errors:
-                    return self._finish_flow()
+                    return await self._finish_flow()
 
         schema: VolDictType = {
             vol.Required(CONF_NAME): selector.TextSelector(
@@ -231,7 +252,7 @@ class EcovacsConfigFlow(ConfigFlow, domain=DOMAIN):
                 if not devices:
                     errors["base"] = "unknown"
                 else:
-                    return self._finish_flow()
+                    return await self._finish_flow()
 
         return self.async_show_form(
             step_id="device_verification",
@@ -266,7 +287,7 @@ class EcovacsConfigFlow(ConfigFlow, domain=DOMAIN):
         """Confirm credentials and verify a new device id if required."""
         errors: dict[str, str] = {}
         if user_input:
-            api = self._store_api({**self._input, **user_input})
+            api = await self._store_api({**self._input, **user_input})
             try:
                 errors = await _login_and_list_devices(api)
             except DeviceVerificationRequiredError:
@@ -274,7 +295,7 @@ class EcovacsConfigFlow(ConfigFlow, domain=DOMAIN):
                 if not errors:
                     return await self.async_step_device_verification()
             if not errors:
-                return self._finish_flow()
+                return await self._finish_flow()
 
         return self.async_show_form(
             step_id="reauth_confirm",
@@ -311,18 +332,45 @@ class EcovacsConfigFlow(ConfigFlow, domain=DOMAIN):
 class EcovacsOptionsFlow(OptionsFlow):
     """Handle ECOVACS GOAT options."""
 
-    def __init__(self, config_entry: ConfigEntry) -> None:
-        """Initialize options flow."""
-        self._config_entry = config_entry
-
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Manage integration options."""
+        """Choose between debug options and a manual reauthentication."""
+        return self.async_show_menu(
+            step_id="init",
+            menu_options={
+                "configure": "Debug capture",
+                "reauthenticate": "Re-authenticate account",
+            },
+        )
+
+    async def async_step_reauthenticate(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Start the existing reauth flow after dropping the stored session."""
+        if user_input is not None:
+            await async_remove_account_session_store(
+                self.hass, self.config_entry.data.get(CONF_SESSION_STORE_ID)
+            )
+            self.config_entry.async_start_reauth(self.hass)
+            return self.async_abort(reason="reauth_started")
+
+        return self.async_show_form(
+            step_id="reauthenticate",
+            data_schema=vol.Schema({}),
+            description_placeholders={
+                CONF_USERNAME: str(self.config_entry.data.get(CONF_USERNAME, ""))
+            },
+        )
+
+    async def async_step_configure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Manage debug-capture options."""
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
 
-        options = self._config_entry.options
+        options = self.config_entry.options
         schema: VolDictType = {
             vol.Required(
                 OPTION_DEBUG_CAPTURE_RAW_PAYLOADS,
@@ -362,7 +410,7 @@ class EcovacsOptionsFlow(OptionsFlow):
         }
 
         return self.async_show_form(
-            step_id="init",
+            step_id="configure",
             data_schema=vol.Schema(schema),
             description_placeholders={
                 "warning": (

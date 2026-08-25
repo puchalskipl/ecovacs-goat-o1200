@@ -22,7 +22,8 @@ sys.modules.setdefault("custom_components.ecovacs_goat_g1", ecovacs_goat_g1)
 from custom_components.ecovacs_goat_g1.mower_api import (
     META,
     PRIVATE_API_PATH_FORMAT,
-    AccountTokens,
+    AccountSession,
+    Credentials,
     DeviceVerificationRequiredError,
     EcovacsAuthError,
     EcovacsMowerApi,
@@ -30,8 +31,12 @@ from custom_components.ecovacs_goat_g1.mower_api import (
     _load_public_key,
 )
 from custom_components.ecovacs_goat_g1.util import (
+    account_fingerprint,
     generate_client_device_id,
+    generate_session_store_id,
     get_client_device_id,
+    get_session_store_id,
+    is_valid_session_store_id,
 )
 
 
@@ -39,6 +44,7 @@ def test_app_version_is_current() -> None:
     """Password login must advertise a current ECOVACS HOME version."""
     assert META["appVersion"] == "3.14.0"
     login_path = PRIVATE_API_PATH_FORMAT.format(
+        apiVersion="v1",
         country="us",
         lang="EN",
         deviceId="ABCDEF12",
@@ -48,8 +54,26 @@ def test_app_version_is_current() -> None:
         deviceType="1",
         endpoint="user/login",
     )
+    assert "/v1/private/us/" in login_path
     assert "/global_e/3.14.0/google_play/1/user/login" in login_path
     assert "1.6.3" not in login_path
+
+
+def test_check_login_uses_signed_v2_path() -> None:
+    """Session rotation must use the signed v2 checkLogin endpoint."""
+    check_login_path = PRIVATE_API_PATH_FORMAT.format(
+        apiVersion="v2",
+        country="us",
+        lang="EN",
+        deviceId="ABCDEF12",
+        appCode="global_e",
+        appVersion=META["appVersion"],
+        channel="google_play",
+        deviceType="1",
+        endpoint="user/checkLogin",
+    )
+    assert "/v2/private/us/" in check_login_path
+    assert check_login_path.endswith("/user/checkLogin")
 
 
 def test_client_device_id_is_stable_when_persisted() -> None:
@@ -63,13 +87,38 @@ def test_client_device_id_is_stable_when_persisted() -> None:
     assert first != second
 
 
-def _api() -> EcovacsMowerApi:
+def test_session_store_id_is_opaque_and_stable() -> None:
+    """Private-store ids are hex, 32 chars, and reused when already valid."""
+    stored = "a" * 32
+    assert is_valid_session_store_id(stored)
+    assert get_session_store_id({"session_store_id": stored}) == stored
+    assert not is_valid_session_store_id("ABCDEF12")
+    assert not is_valid_session_store_id("../etc")
+    first = generate_session_store_id()
+    second = generate_session_store_id()
+    assert is_valid_session_store_id(first)
+    assert first != second
+
+
+def test_account_fingerprint_binds_identity_not_secrets() -> None:
+    """Fingerprints match case-folded accounts and stay non-reversible."""
+    first = account_fingerprint("User@example.com", "us", "ABCDEF12")
+    second = account_fingerprint("user@example.com", "US", "ABCDEF12")
+    other = account_fingerprint("other@example.com", "US", "ABCDEF12")
+    assert first == second
+    assert first != other
+    assert "user@example.com" not in first
+    assert len(first) == 64
+
+
+def _api(**kwargs) -> EcovacsMowerApi:
     return EcovacsMowerApi(
         MagicMock(),
         username="user@example.com",
         password="secret",
         country="US",
         device_id="ABCDEF12",
+        **kwargs,
     )
 
 
@@ -99,19 +148,17 @@ async def test_auth_error_codes() -> None:
 
 
 @pytest.mark.asyncio
-async def test_authenticate_uses_stored_tokens_instead_of_password() -> None:
-    """Setup after verification must not call the password login again."""
-    from custom_components.ecovacs_goat_g1.mower_api import Credentials
-
-    api = EcovacsMowerApi(
-        MagicMock(),
-        username="user@example.com",
-        password="secret",
-        country="US",
-        device_id="ABCDEF12",
-        account_tokens=AccountTokens(user_id="uid-long", access_token="access-1"),
+async def test_authenticate_rotates_stored_session_via_check_login() -> None:
+    """Setup after verification must reuse checkLogin instead of password login."""
+    persisted = AsyncMock()
+    api = _api(
+        account_session=AccountSession(user_id="uid-long", access_token="access-1"),
+        account_session_update_callback=persisted,
     )
     api._login_password = AsyncMock(side_effect=AssertionError("password login"))
+    api._check_login = AsyncMock(
+        return_value=AccountSession(user_id="uid-long", access_token="access-2")
+    )
     api._complete_login = AsyncMock(
         return_value=Credentials(
             user_id="uid-short", token="portal-token", expires_at=9_999_999_999
@@ -121,9 +168,52 @@ async def test_authenticate_uses_stored_tokens_instead_of_password() -> None:
     credentials = await api.authenticate()
 
     api._login_password.assert_not_called()
-    api._complete_login.assert_awaited_once_with("uid-long", "access-1")
+    api._check_login.assert_awaited_once()
+    api._complete_login.assert_awaited_once_with("uid-long", "access-2")
+    persisted.assert_awaited_once_with(
+        AccountSession(user_id="uid-long", access_token="access-2")
+    )
     assert credentials.token == "portal-token"
-    assert api.account_tokens == AccountTokens("uid-long", "access-1")
+    assert api.account_session == AccountSession("uid-long", "access-2")
+
+
+@pytest.mark.asyncio
+async def test_authenticate_keeps_session_on_transient_check_login_error() -> None:
+    """A non-auth checkLogin failure must not discard the private session."""
+    persisted = AsyncMock()
+    existing = AccountSession(user_id="uid-long", access_token="access-1")
+    api = _api(
+        account_session=existing,
+        account_session_update_callback=persisted,
+    )
+    api._check_login = AsyncMock(side_effect=EcovacsAuthError("auth call failed"))
+    api._login_password = AsyncMock(side_effect=AssertionError("password login"))
+
+    with pytest.raises(EcovacsAuthError, match="auth call failed"):
+        await api.authenticate()
+
+    api._login_password.assert_not_called()
+    persisted.assert_not_called()
+    assert api.account_session == existing
+
+
+@pytest.mark.asyncio
+async def test_authenticate_clears_session_on_definitive_auth_failure() -> None:
+    """Expired credentials must drop the private session before password login."""
+    persisted = AsyncMock()
+    api = _api(
+        account_session=AccountSession(user_id="uid-long", access_token="access-1"),
+        account_session_update_callback=persisted,
+    )
+    api._check_login = AsyncMock(side_effect=EcovacsAuthError("invalid credentials"))
+    api._login_password = AsyncMock(side_effect=DeviceVerificationRequiredError("1013"))
+
+    with pytest.raises(DeviceVerificationRequiredError):
+        await api.authenticate()
+
+    persisted.assert_awaited_once_with(None)
+    api._login_password.assert_awaited_once()
+    assert api.account_session is None
 
 
 def test_load_public_key_roundtrip() -> None:
