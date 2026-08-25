@@ -31,6 +31,10 @@ repos:
         args:
           - --config
           - auto
+          # Workflows use official version tags (checkout@v5, hassfest@master).
+          # Pinning every action to a SHA is a separate hardening task.
+          - --exclude-rule
+          - yaml.github-actions.security.github-actions-mutable-action-tag
           - --error
           - --disable-version-check
           - --quiet
