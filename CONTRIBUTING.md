@@ -1,4 +1,4 @@
-﻿# Contributing
+# Contributing
 
 This repository is intentionally scoped to ECOVACS GOAT mower support. Please keep changes conservative and based on observed official-app behavior where possible.
 

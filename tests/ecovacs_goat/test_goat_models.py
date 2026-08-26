@@ -1,4 +1,4 @@
-﻿"""Tests for GOAT G1 retail SKU classification."""
+"""Tests for GOAT G1 retail SKU classification."""
 
 from pathlib import Path
 import sys

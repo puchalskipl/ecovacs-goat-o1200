@@ -1,4 +1,4 @@
-﻿"""Tests for eco-ng protocol compatibility helpers."""
+"""Tests for eco-ng protocol compatibility helpers."""
 
 from pathlib import Path
 import sys

@@ -1,4 +1,4 @@
-﻿"""Tests for ECOVACS mower message parsing."""
+"""Tests for ECOVACS mower message parsing."""
 
 from pathlib import Path
 import sys

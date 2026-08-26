@@ -1,4 +1,4 @@
-﻿name: Develop pre-release
+name: Develop pre-release
 
 # Every push to develop publishes an incrementing beta pre-release
 # (e.g. 0.2.0b1, 0.2.0b2, ...) so testers can install the latest development

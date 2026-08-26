@@ -1,4 +1,4 @@
-﻿"""Tests for GOAT capability profiles (per-model protocol selection)."""
+"""Tests for GOAT capability profiles (per-model protocol selection)."""
 
 from pathlib import Path
 import sys

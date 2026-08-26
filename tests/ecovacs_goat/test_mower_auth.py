@@ -1,4 +1,4 @@
-﻿"""Tests for ECOVACS device-verification authentication."""
+"""Tests for ECOVACS device-verification authentication."""
 
 from __future__ import annotations
 

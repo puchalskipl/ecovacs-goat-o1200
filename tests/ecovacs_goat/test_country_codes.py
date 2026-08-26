@@ -1,4 +1,4 @@
-﻿"""Tests for ECOVACS country-code/API-code mapping helpers."""
+"""Tests for ECOVACS country-code/API-code mapping helpers."""
 
 from pathlib import Path
 import sys

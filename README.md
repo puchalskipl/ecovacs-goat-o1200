@@ -1,4 +1,4 @@
-﻿# Ecovacs GOAT O1200 for Home Assistant
+# Ecovacs GOAT O1200 for Home Assistant
 
 A mower-only Home Assistant custom integration for ECOVACS GOAT lawn mowers,
 **tuned for the GOAT O1200 LiDAR Pro** (O-series): live map with the mowed

@@ -1,4 +1,4 @@
-﻿name: Release
+name: Release
 
 # Publishes a stable GitHub release when main is updated. The stable version is
 # the manifest's base version with any pre-release suffix stripped

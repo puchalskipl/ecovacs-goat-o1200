@@ -1,4 +1,4 @@
-﻿"""Tests for O-series (O1200 LiDAR Pro) map, settings, and telemetry parsing.
+"""Tests for O-series (O1200 LiDAR Pro) map, settings, and telemetry parsing.
 
 Payload shapes in this module mirror a live-mowing debug capture of a GOAT
 O1200 LiDAR Pro (firmware 2.13.10, 2026-08).
