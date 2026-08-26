@@ -44,7 +44,7 @@ class MowerSensorDescription(SensorEntityDescription):
 SENSORS: tuple[MowerSensorDescription, ...] = (
     MowerSensorDescription(
         key="battery_level",
-        name="Battery level",
+        translation_key="battery_level",
         value_fn=lambda state: state.battery,
         native_unit_of_measurement=PERCENTAGE,
         device_class=SensorDeviceClass.BATTERY,
@@ -52,52 +52,52 @@ SENSORS: tuple[MowerSensorDescription, ...] = (
     ),
     MowerSensorDescription(
         key="error",
-        name="Error",
+        translation_key="error",
         value_fn=lambda state: state.error_code,
         attr_fn=lambda state: {CONF_DESCRIPTION: state.error_description},
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
     MowerSensorDescription(
         key="network_ip",
-        name="IP address",
+        translation_key="network_ip",
         value_fn=lambda state: state.network.ip,
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
     MowerSensorDescription(
         key="network_rssi",
-        name="Wi-Fi RSSI",
+        translation_key="network_rssi",
         value_fn=lambda state: state.network.rssi,
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
     MowerSensorDescription(
         key="network_ssid",
-        name="Wi-Fi SSID",
+        translation_key="network_ssid",
         value_fn=lambda state: state.network.ssid,
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
     MowerSensorDescription(
         key="stats_area",
-        name="Area mowed",
+        translation_key="stats_area",
         value_fn=lambda state: _area_square_meters(state.stats.area),
         native_unit_of_measurement=UnitOfArea.SQUARE_METERS,
         device_class=SensorDeviceClass.AREA,
     ),
     MowerSensorDescription(
         key="stats_job_area",
-        name="Mowing area",
+        translation_key="stats_job_area",
         value_fn=lambda state: _area_square_meters(state.stats.job_area),
         native_unit_of_measurement=UnitOfArea.SQUARE_METERS,
         device_class=SensorDeviceClass.AREA,
     ),
     MowerSensorDescription(
         key="stats_progress",
-        name="Mowing progress",
+        translation_key="stats_progress",
         value_fn=lambda state: state.stats.progress,
         native_unit_of_measurement=PERCENTAGE,
     ),
     MowerSensorDescription(
         key="stats_time",
-        name="Mowing duration",
+        translation_key="stats_time",
         value_fn=lambda state: state.stats.duration,
         native_unit_of_measurement=UnitOfTime.SECONDS,
         suggested_unit_of_measurement=UnitOfTime.MINUTES,
@@ -105,16 +105,22 @@ SENSORS: tuple[MowerSensorDescription, ...] = (
     ),
     MowerSensorDescription(
         key="live_map",
-        name="Live map",
+        translation_key="live_map",
         value_fn=lambda state: "live"
-        if state.map.current_position or state.map.trace.chunks
+        if (
+            state.map.current_position
+            or state.map.trace.chunks
+            or state.map.trace.path
+            or state.map.position_history
+            or state.map.zones
+        )
         else None,
         attr_fn=lambda state: state.map.as_dict(),
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
     MowerSensorDescription(
         key="total_stats_area",
-        name="Total area mowed",
+        translation_key="total_stats_area",
         value_fn=lambda state: _area_square_meters(state.stats.total_area),
         native_unit_of_measurement=UnitOfArea.SQUARE_METERS,
         state_class=SensorStateClass.TOTAL_INCREASING,
@@ -122,7 +128,7 @@ SENSORS: tuple[MowerSensorDescription, ...] = (
     ),
     MowerSensorDescription(
         key="total_stats_time",
-        name="Total mowing duration",
+        translation_key="total_stats_time",
         value_fn=lambda state: state.stats.total_duration,
         native_unit_of_measurement=UnitOfTime.SECONDS,
         suggested_unit_of_measurement=UnitOfTime.HOURS,
@@ -131,27 +137,40 @@ SENSORS: tuple[MowerSensorDescription, ...] = (
     ),
     MowerSensorDescription(
         key="total_stats_cleanings",
-        name="Total mowings",
+        translation_key="total_stats_cleanings",
         value_fn=lambda state: state.stats.total_count,
         state_class=SensorStateClass.TOTAL_INCREASING,
     ),
     MowerSensorDescription(
         key="lifespan_blade",
-        name="Blade lifespan",
+        translation_key="lifespan_blade",
         value_fn=lambda state: state.lifespans.get("blade"),
         native_unit_of_measurement=PERCENTAGE,
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
     MowerSensorDescription(
         key="lifespan_lens_brush",
-        name="Lens brush lifespan",
+        translation_key="lifespan_lens_brush",
         value_fn=lambda state: state.lifespans.get("lensBrush"),
         native_unit_of_measurement=PERCENTAGE,
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
     MowerSensorDescription(
+        key="protection_state",
+        translation_key="protection_state",
+        value_fn=lambda state: _active_protections(state),
+        attr_fn=lambda state: {
+            "animal_protection_active": state.protections.animal_active,
+            "rain_protection_active": state.protections.rain_active,
+            "rain_delay_active": state.protections.rain_delay_active,
+            "emergency_stop": state.protections.emergency_stop,
+            "locked": state.protections.locked,
+        },
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    MowerSensorDescription(
         key="battery_temperature",
-        name="Battery temperature",
+        translation_key="battery_temperature",
         value_fn=lambda state: state.telemetry.battery_temperature,
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
         device_class=SensorDeviceClass.TEMPERATURE,
@@ -160,7 +179,7 @@ SENSORS: tuple[MowerSensorDescription, ...] = (
     ),
     MowerSensorDescription(
         key="battery_current",
-        name="Battery current",
+        translation_key="battery_current",
         value_fn=lambda state: state.telemetry.battery_current,
         native_unit_of_measurement=UnitOfElectricCurrent.MILLIAMPERE,
         suggested_unit_of_measurement=UnitOfElectricCurrent.AMPERE,
@@ -170,7 +189,7 @@ SENSORS: tuple[MowerSensorDescription, ...] = (
     ),
     MowerSensorDescription(
         key="battery_voltage",
-        name="Battery voltage",
+        translation_key="battery_voltage",
         value_fn=lambda state: state.telemetry.battery_voltage,
         native_unit_of_measurement=UnitOfElectricPotential.MILLIVOLT,
         suggested_unit_of_measurement=UnitOfElectricPotential.VOLT,
@@ -180,7 +199,7 @@ SENSORS: tuple[MowerSensorDescription, ...] = (
     ),
     MowerSensorDescription(
         key="system_voltage",
-        name="System voltage",
+        translation_key="system_voltage",
         value_fn=lambda state: state.telemetry.system_voltage,
         native_unit_of_measurement=UnitOfElectricPotential.MILLIVOLT,
         suggested_unit_of_measurement=UnitOfElectricPotential.VOLT,
@@ -191,7 +210,7 @@ SENSORS: tuple[MowerSensorDescription, ...] = (
     ),
     MowerSensorDescription(
         key="motor_voltage",
-        name="Motor voltage",
+        translation_key="motor_voltage",
         value_fn=lambda state: state.telemetry.motor_voltage,
         native_unit_of_measurement=UnitOfElectricPotential.MILLIVOLT,
         suggested_unit_of_measurement=UnitOfElectricPotential.VOLT,
@@ -202,7 +221,7 @@ SENSORS: tuple[MowerSensorDescription, ...] = (
     ),
     MowerSensorDescription(
         key="goat_model_line",
-        name="GOAT model line",
+        translation_key="goat_model_line",
         value_fn=lambda state: variant_label(state.goat_variant),
         attr_fn=lambda state: {
             "variant_id": state.goat_variant,
@@ -214,6 +233,29 @@ SENSORS: tuple[MowerSensorDescription, ...] = (
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
 )
+
+
+def _active_protections(state: MowerState) -> str | None:
+    """Summarise which protections are currently holding the mower back."""
+    protections = state.protections
+    active = [
+        label
+        for label, value in (
+            ("animal", protections.animal_active),
+            ("rain", protections.rain_active),
+            ("rain_delay", protections.rain_delay_active),
+            ("emergency_stop", protections.emergency_stop),
+            ("locked", protections.locked),
+        )
+        if value
+    ]
+    if not active:
+        return (
+            "none"
+            if protections != type(protections)()
+            else None
+        )
+    return ", ".join(active)
 
 
 def _area_square_meters(value: int | None) -> float | None:
@@ -268,7 +310,7 @@ class DebugCaptureSensor(EcovacsMowerEntity, SensorEntity):
     """Expose debug capture status and download URL."""
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_name = "Debug capture"
+    _attr_translation_key = "debug_capture"
 
     def __init__(self, coordinator) -> None:
         """Initialize debug capture sensor."""

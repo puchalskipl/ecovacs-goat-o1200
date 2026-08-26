@@ -24,7 +24,8 @@
         "data": {
           "verification_code": "Verification code"
         },
-        "description": "Enter the verification code ECOVACS sent to {username} to confirm Home Assistant as a trusted device."
+        "description": "ECOVACS emailed a verification code to **{username}**. Enter it below to authorise Home Assistant as a trusted device.\n\nThe message usually arrives within a minute — check the spam folder if you do not see it. Codes expire quickly: if this one is rejected, close this dialog and start the setup again to get a new code.",
+        "title": "Email verification"
       },
       "reauth_confirm": {
         "data": {
@@ -63,43 +64,78 @@
     }
   },
   "entity": {
+    "button": {
+      "clear_debug_capture": {
+        "name": "Clear debug captures"
+      },
+      "end_mowing": {
+        "name": "Stop mowing"
+      },
+      "export_debug_capture": {
+        "name": "Export debug capture"
+      },
+      "refresh_state": {
+        "name": "Refresh state"
+      },
+      "start_debug_capture": {
+        "name": "Start debug capture"
+      },
+      "start_edge_trim": {
+        "name": "Start edge trimming"
+      },
+      "stop_debug_capture": {
+        "name": "Stop debug capture"
+      }
+    },
     "number": {
       "cut_direction": {
         "name": "Cut direction"
       },
+      "cutting_height": {
+        "name": "Cutting height"
+      },
+      "fall_volume": {
+        "name": "Lift alarm volume"
+      },
       "rain_delay": {
         "name": "Rain delay"
+      },
+      "search_volume": {
+        "name": "Find mower volume"
+      },
+      "volume": {
+        "name": "Volume"
+      }
+    },
+    "select": {
+      "mowing_efficiency": {
+        "name": "Mowing speed",
+        "state": {
+          "quick": "Efficiency (0.5 m/s)",
+          "delicate": "Delicate (0.35 m/s)"
+        }
+      },
+      "obstacle_avoidance": {
+        "name": "Obstacle avoidance",
+        "state": {
+          "short_grass": "Short grass",
+          "general": "General",
+          "bumpy_tall_grass": "Bumpy or tall grass"
+        }
       }
     },
     "sensor": {
+      "battery_current": {
+        "name": "Battery current"
+      },
       "battery_level": {
         "name": "Battery level"
       },
-      "error": {
-        "name": "Error",
-        "state_attributes": {
-          "description": {
-            "name": "Description"
-          }
-        }
+      "battery_temperature": {
+        "name": "Battery temperature"
       },
-      "lifespan_blade": {
-        "name": "Blade lifespan"
-      },
-      "lifespan_lens_brush": {
-        "name": "Lens brush lifespan"
-      },
-      "network_ip": {
-        "name": "IP address"
-      },
-      "network_rssi": {
-        "name": "Wi-Fi RSSI"
-      },
-      "network_ssid": {
-        "name": "Wi-Fi SSID"
-      },
-      "live_map": {
-        "name": "Live map"
+      "battery_voltage": {
+        "name": "Battery voltage"
       },
       "debug_capture": {
         "name": "Debug capture",
@@ -118,6 +154,41 @@
           }
         }
       },
+      "error": {
+        "name": "Error",
+        "state_attributes": {
+          "description": {
+            "name": "Description"
+          }
+        }
+      },
+      "goat_model_line": {
+        "name": "GOAT model line"
+      },
+      "lifespan_blade": {
+        "name": "Blade lifespan"
+      },
+      "lifespan_lens_brush": {
+        "name": "Lens brush lifespan"
+      },
+      "live_map": {
+        "name": "Live map"
+      },
+      "motor_voltage": {
+        "name": "Motor voltage"
+      },
+      "network_ip": {
+        "name": "IP address"
+      },
+      "network_rssi": {
+        "name": "Wi-Fi RSSI"
+      },
+      "network_ssid": {
+        "name": "Wi-Fi SSID"
+      },
+      "protection_state": {
+        "name": "Active protections"
+      },
       "stats_area": {
         "name": "Area mowed"
       },
@@ -130,6 +201,9 @@
       "stats_time": {
         "name": "Mowing duration"
       },
+      "system_voltage": {
+        "name": "System voltage"
+      },
       "total_stats_area": {
         "name": "Total area mowed"
       },
@@ -140,35 +214,30 @@
         "name": "Total mowing duration"
       }
     },
-    "select": {
-      "mowing_efficiency": {
-        "name": "Mowing efficiency"
-      },
-      "obstacle_avoidance": {
-        "name": "Obstacle avoidance"
-      }
-    },
     "switch": {
       "ai_recognition": {
-        "name": "AI Recognition"
+        "name": "AI recognition"
       },
       "animal_protection": {
         "name": "Animal protection"
       },
+      "auto_cut_direction": {
+        "name": "Weekly cut direction change"
+      },
       "border_switch": {
-        "name": "Border switch"
+        "name": "Edge mowing"
       },
       "cross_map_border_warning": {
-        "name": "Cross map border warning"
+        "name": "Boundary crossing alarm"
       },
       "move_up_warning": {
-        "name": "Move up warning"
+        "name": "Lift alarm"
       },
       "rain_sensor": {
         "name": "Rain sensor"
       },
       "safer_mode": {
-        "name": "Safer Mode"
+        "name": "Safer mode"
       }
     },
     "time": {
@@ -177,26 +246,6 @@
       },
       "animal_protection_start": {
         "name": "Animal protection start"
-      }
-    },
-    "button": {
-      "end_mowing": {
-        "name": "Stop mowing"
-      },
-      "refresh_state": {
-        "name": "Refresh state"
-      },
-      "start_debug_capture": {
-        "name": "Start debug capture"
-      },
-      "stop_debug_capture": {
-        "name": "Stop debug capture"
-      },
-      "export_debug_capture": {
-        "name": "Export debug capture"
-      },
-      "clear_debug_capture": {
-        "name": "Clear debug captures"
       }
     }
   }

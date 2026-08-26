@@ -14,35 +14,35 @@ from .entity import EcovacsMowerEntity
 BUTTONS: tuple[ButtonEntityDescription, ...] = (
     ButtonEntityDescription(
         key="refresh_state",
-        name="Refresh state",
+        translation_key="refresh_state",
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
     ButtonEntityDescription(
         key="end_mowing",
-        name="Stop mowing",
+        translation_key="end_mowing",
     ),
     ButtonEntityDescription(
         key="start_edge_trim",
-        name="Start edge trimming",
+        translation_key="start_edge_trim",
     ),
     ButtonEntityDescription(
         key="start_debug_capture",
-        name="Start debug capture",
+        translation_key="start_debug_capture",
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
     ButtonEntityDescription(
         key="stop_debug_capture",
-        name="Stop debug capture",
+        translation_key="stop_debug_capture",
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
     ButtonEntityDescription(
         key="export_debug_capture",
-        name="Export debug capture",
+        translation_key="export_debug_capture",
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
     ButtonEntityDescription(
         key="clear_debug_capture",
-        name="Clear debug captures",
+        translation_key="clear_debug_capture",
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
 )

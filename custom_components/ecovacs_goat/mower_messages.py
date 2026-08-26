@@ -17,6 +17,7 @@ from .mower_models import (
     MowerMap,
     MowerMapInfo,
     MowerMapTrace,
+    MowerProtections,
     MowerSettings,
     MowerState,
     MowerStats,
@@ -25,8 +26,13 @@ from .mower_models import (
 )
 
 MOWING_EFFICIENCY_OPTIONS = ("quick", "delicate")
-MOWING_EFFICIENCY_BY_LEVEL = {1: "quick", 2: "delicate"}
-MOWING_EFFICIENCY_LEVELS = {value: key for key, value in MOWING_EFFICIENCY_BY_LEVEL.items()}
+# Mowing speed levels differ per family: the G1 line reports 1/2, while
+# O-series mowers report 4 = 0.5 m/s ("efficiency") and 7 = 0.35 m/s
+# ("delicate"). Reads accept both; writes pick the family's levels from the
+# capability profile.
+MOWING_EFFICIENCY_BY_LEVEL = {1: "quick", 2: "delicate", 4: "quick", 7: "delicate"}
+MOWING_EFFICIENCY_LEVELS = {"quick": 1, "delicate": 2}
+MOWING_EFFICIENCY_LEVELS_O_SERIES = {"quick": 4, "delicate": 7}
 
 OBSTACLE_AVOIDANCE_OPTIONS = ("short_grass", "general", "bumpy_tall_grass")
 OBSTACLE_AVOIDANCE_BY_LEVEL = {
@@ -510,17 +516,21 @@ def apply_command_data(state: MowerState, command: str, data: Any) -> MowerState
                     ),
                 )
         case "onProtectState" | "getProtectState":
+            # Runtime protection flags (``isAnimProtect``, ``isRainProtect``,
+            # ``isLocked``, ...) report whether a protection is *active right
+            # now*, not whether its setting is enabled: animal protection with
+            # a 21:00-08:00 window reports 0 at midday while the setting is on.
+            # The settings themselves come from getAnimProtect / getChildLock,
+            # so this reply must not overwrite them.
             if isinstance(data, dict):
                 state = replace(
                     state,
-                    settings=replace(
-                        state.settings,
-                        animal_enabled=_bool(data.get("isAnimProtect"))
-                        if data.get("isAnimProtect") is not None
-                        else state.settings.animal_enabled,
-                        safer_mode=_bool(data.get("isLocked"))
-                        if data.get("isLocked") is not None
-                        else state.settings.safer_mode,
+                    protections=MowerProtections(
+                        animal_active=_bool(data.get("isAnimProtect")),
+                        rain_active=_bool(data.get("isRainProtect")),
+                        rain_delay_active=_bool(data.get("isRainDelay")),
+                        emergency_stop=_bool(data.get("isEStop")),
+                        locked=_bool(data.get("isLocked")),
                     ),
                 )
         case "getRobotFeature" | "onRobotFeature":
@@ -626,14 +636,30 @@ def _map_position_data(
 ) -> MowerMap:
     """Merge mower, station, and beacon positions into the map cache."""
     mower_position = _map_position(data.get("deebotPos"))
+    # The O-series map origin IS the charging station: a docked mower reports
+    # exactly (0, 0). Accept it as the marker position, learn it as the
+    # station location (chargePos itself always comes back invalid), and keep
+    # it out of the mowing trail so the path does not draw a line to the dock.
+    at_dock = (
+        mower_position is not None
+        and mower_position.x == 0
+        and mower_position.y == 0
+    )
     charge_positions = _map_positions(data.get("chargePos"))
+    if at_dock and not charge_positions and not current.charge_positions:
+        charge_positions = (MapPosition(x=0, y=0),)
     # G1 reports UWB beacon positions; O-series (RTK) reports rtkPos instead.
     uwb_positions = _map_positions(data.get("uwbPos")) or _map_positions(
         data.get("rtkPos")
     )
     history = current.position_history
 
-    if record_history and mower_position and mower_position.invalid != 1:
+    if (
+        record_history
+        and mower_position
+        and mower_position.invalid != 1
+        and not at_dock
+    ):
         if not history or (
             history[-1].x != mower_position.x or history[-1].y != mower_position.y
         ):
@@ -1211,6 +1237,42 @@ def _progress(
     if mowed_area is None or job_area is None or job_area <= 0:
         return None
     return round(max(0, min(100, mowed_area / job_area * 100)), 1)
+
+
+def merge_info_chunks(
+    store: dict[str, dict[int, str]], data: Any
+) -> dict[str, Any] | None:
+    """Reassemble a chunked ``onInfo`` reply, returning it once complete.
+
+    Grouped ``getInfo`` replies that exceed the MQTT payload limit are split
+    into ``{d_id, d_seq, d_sum, d_val}`` fragments, each carrying a slice of
+    the response JSON *as text*. Only the concatenation parses, so fragments
+    are buffered per ``d_id`` until ``d_sum`` of them have arrived. Returns
+    the decoded message (``{"body": {"data": {...}}}``) or None while
+    incomplete.
+    """
+    if not isinstance(data, dict):
+        return None
+    batch_id = data.get("d_id")
+    fragment = data.get("d_val")
+    if batch_id is None or not isinstance(fragment, str):
+        return None
+
+    batch_id = str(batch_id)
+    total = _int(data.get("d_sum")) or 1
+    index = _int(data.get("d_seq")) or 0
+    chunks = store.setdefault(batch_id, {})
+    chunks[index] = fragment
+
+    if len(chunks) < total:
+        return None
+
+    store.pop(batch_id, None)
+    try:
+        merged = json.loads("".join(chunks[key] for key in sorted(chunks)))
+    except (json.JSONDecodeError, KeyError):
+        return None
+    return merged if isinstance(merged, dict) else None
 
 
 def _int_or(value: Any, fallback: int | None) -> int | None:

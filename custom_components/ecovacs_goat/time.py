@@ -24,13 +24,13 @@ class MowerTimeDescription(TimeEntityDescription):
 TIMES: tuple[MowerTimeDescription, ...] = (
     MowerTimeDescription(
         key="animal_protection_start",
-        name="Animal protection start",
+        translation_key="animal_protection_start",
         cache_key="animal_start",
         entity_category=EntityCategory.CONFIG,
     ),
     MowerTimeDescription(
         key="animal_protection_end",
-        name="Animal protection end",
+        translation_key="animal_protection_end",
         cache_key="animal_end",
         entity_category=EntityCategory.CONFIG,
     ),

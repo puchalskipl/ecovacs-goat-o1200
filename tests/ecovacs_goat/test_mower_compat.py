@@ -159,6 +159,7 @@ async def test_refresh_rtk_map_fetches_layers_and_decodes() -> None:
                 }
             }
         },  # getRTK
+        {"body": {"data": {"mid": "1"}}},  # getMI
         {
             "body": {
                 "data": {"mid": "1", "type": "vw", "subsets": "XQAABAACAAAAAC2XPAAAAA=="}
@@ -184,14 +185,67 @@ async def test_refresh_rtk_map_fetches_layers_and_decodes() -> None:
     assert state.map.rtk_station is not None and state.map.rtk_station.x == 578
     assert state.map.no_go_zones == ()
     assert [p.as_dict() for p in state.map.areas] == [{"x": 100, "y": 200}]
-    # Commands and the getAreaSet body must match the captured O800 protocol.
+    # Commands and the getAreaSet body must match the captured protocol.
     commands = [call.args[1] for call in api.control.call_args_list]
-    assert commands == ["getMapState", "getRTK", "getMapTrack", "getAreaSet"]
-    assert api.control.call_args_list[3].args[2] == {
+    assert commands == ["getMapState", "getRTK", "getMI", "getMapTrack", "getAreaSet"]
+    assert api.control.call_args_list[4].args[2] == {
         "mid": "1",
         "aid": "0",
         "type": "ar",
     }
+
+
+@pytest.mark.asyncio
+async def test_refresh_rtk_map_skips_area_set_without_a_real_map_id() -> None:
+    """The placeholder map id "0" returns an empty blob, so skip that query.
+
+    O-series position replies always carry ``mid: "0"``; the real id arrives on
+    the ``onMI`` push that ``getMI`` triggers, so the area layer waits for it.
+    """
+    api = AsyncMock()
+    events: list[tuple[str, dict]] = []
+    api.control.return_value = {"body": {"data": {}}}
+
+    state = await refresh_rtk_map(
+        api,
+        object(),
+        MowerState(map=MowerMap(mid="0")),
+        capture=lambda name, data: events.append((name, data)),
+    )
+
+    commands = [call.args[1] for call in api.control.call_args_list]
+    assert "getAreaSet" not in commands
+    assert commands == ["getMapState", "getRTK", "getMI", "getMapTrack"]
+    assert ("rtk_map_refresh_skipped", {"command": "getAreaSet", "mid": "0"}) in events
+    assert state.map.areas == ()
+
+
+@pytest.mark.asyncio
+async def test_map_info_probe_tries_variants_until_accepted() -> None:
+    """getMI payload variants are probed; the accepted one is reported."""
+    api = AsyncMock()
+    events: list[tuple[str, dict]] = []
+    api.control.side_effect = [
+        {"body": {"data": {"state": "built"}}},  # getMapState
+        {"body": {"data": {"result": 1, "rtks": []}}},  # getRTK
+        EcovacsApiError("no type"),  # getMI variant 1 rejected
+        {"body": {"data": {"mid": "1"}}},  # getMI variant 2 accepted
+        {"body": {"data": {}}},  # getMapTrack
+        {"body": {"data": {"mid": "1", "type": "ar", "subsets": ""}}},  # getAreaSet
+    ]
+
+    state = await refresh_rtk_map(
+        api,
+        object(),
+        MowerState(),
+        capture=lambda name, data: events.append((name, data)),
+    )
+
+    assert state.map.mid == "1"
+    accepted = [data for name, data in events if name == "map_info_payload_accepted"]
+    assert accepted == [{"payload": {"mid": "1", "type": "-1"}}]
+    # The learned id then unlocks the area-set query.
+    assert api.control.call_args_list[-1].args[1] == "getAreaSet"
 
 
 @pytest.mark.asyncio
@@ -203,6 +257,9 @@ async def test_refresh_rtk_map_survives_command_failures() -> None:
     api.control.side_effect = [
         EcovacsApiError("getMapState fail"),
         EcovacsApiError("getRTK fail"),
+        EcovacsApiError("getMI fail"),
+        EcovacsApiError("getMI fail"),
+        EcovacsApiError("getMI fail"),
         EcovacsApiError("getMapTrack fail"),
         {
             "body": {
@@ -223,5 +280,6 @@ async def test_refresh_rtk_map_survives_command_failures() -> None:
 
     # The final successful call still applied despite earlier failures.
     assert [p.as_dict() for p in state.map.areas] == [{"x": 5, "y": 6}]
-    assert len(events) == 3
-    assert all(event == "rtk_map_refresh_error" for event, _ in events)
+    error_events = [event for event, _ in events if event == "rtk_map_refresh_error"]
+    assert len(error_events) == 3  # getMapState, getRTK, getMapTrack
+    assert any(event == "map_info_unavailable" for event, _ in events)

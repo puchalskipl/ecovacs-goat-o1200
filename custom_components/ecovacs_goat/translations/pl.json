@@ -1,0 +1,233 @@
+{
+  "config": {
+    "abort": {
+      "already_configured": "To konto jest już skonfigurowane.",
+      "reauth_successful": "Ponowne uwierzytelnienie zakończone powodzeniem."
+    },
+    "error": {
+      "cannot_connect": "Nie udało się połączyć.",
+      "invalid_auth": "Nieprawidłowe dane logowania.",
+      "invalid_verification_code": "Kod weryfikacyjny jest nieprawidłowy lub wygasł.",
+      "unknown": "Nieoczekiwany błąd.",
+      "invalid_name": "Podaj nazwę."
+    },
+    "step": {
+      "user": {
+        "data": {
+          "name": "Nazwa",
+          "country": "Kraj",
+          "password": "Hasło",
+          "username": "Nazwa użytkownika"
+        }
+      },
+      "device_verification": {
+        "title": "Weryfikacja e-mail",
+        "data": {
+          "verification_code": "Kod weryfikacyjny"
+        },
+        "description": "ECOVACS wysłał kod weryfikacyjny na adres **{username}**. Wpisz go poniżej, aby autoryzować Home Assistant jako zaufane urządzenie.\n\nWiadomość zwykle przychodzi w ciągu minuty — sprawdź folder spam, jeśli jej nie widzisz. Kody szybko tracą ważność: jeśli ten zostanie odrzucony, zamknij to okno i rozpocznij konfigurację ponownie, aby otrzymać nowy."
+      },
+      "reauth_confirm": {
+        "data": {
+          "password": "Hasło"
+        },
+        "description": "Podaj hasło ECOVACS dla {username}, aby ponownie połączyć integrację."
+      }
+    }
+  },
+  "options": {
+    "abort": {
+      "reauth_started": "Dokończ okno ponownego uwierzytelnienia, aby połączyć konto ECOVACS."
+    },
+    "step": {
+      "init": {
+        "title": "Ecovacs GOAT O1200",
+        "description": "Zmień opcje integracji lub zaloguj się ponownie do ECOVACS.",
+        "menu_options": {
+          "configure": "Opcje integracji",
+          "reauthenticate": "Zaloguj ponownie"
+        }
+      },
+      "configure": {
+        "description": "{warning}",
+        "data": {
+          "auto_live_map": "Utrzymuj mapę na żywo podczas koszenia (pozycja i skoszony ślad aktualizują się bez otwierania aplikacji)",
+          "debug_capture_raw_payloads": "Zapisuj surowe dane w zapisach diagnostycznych",
+          "debug_capture_max_duration_minutes": "Maksymalny czas zapisu",
+          "debug_capture_max_size_mb": "Maksymalny rozmiar zapisu"
+        }
+      },
+      "reauthenticate": {
+        "title": "Zaloguj ponownie",
+        "description": "Ta opcja wylogowuje zapisaną sesję ECOVACS dla {username} i rozpoczyna nowe logowanie. Potrzebne będzie hasło do konta, a ECOVACS może wysłać nowy kod weryfikacyjny e-mailem."
+      }
+    }
+  },
+  "entity": {
+    "button": {
+      "clear_debug_capture": {
+        "name": "Usuń zapisy diagnostyczne"
+      },
+      "end_mowing": {
+        "name": "Zakończ koszenie"
+      },
+      "export_debug_capture": {
+        "name": "Eksportuj zapis diagnostyczny"
+      },
+      "refresh_state": {
+        "name": "Odśwież stan"
+      },
+      "start_debug_capture": {
+        "name": "Rozpocznij zapis diagnostyczny"
+      },
+      "start_edge_trim": {
+        "name": "Przycinanie krawędzi"
+      },
+      "stop_debug_capture": {
+        "name": "Zatrzymaj zapis diagnostyczny"
+      }
+    },
+    "number": {
+      "cut_direction": {
+        "name": "Kierunek koszenia"
+      },
+      "cutting_height": {
+        "name": "Wysokość koszenia"
+      },
+      "fall_volume": {
+        "name": "Głośność alarmu podniesienia"
+      },
+      "rain_delay": {
+        "name": "Opóźnienie po deszczu"
+      },
+      "search_volume": {
+        "name": "Głośność sygnału szukania"
+      },
+      "volume": {
+        "name": "Głośność"
+      }
+    },
+    "select": {
+      "mowing_efficiency": {
+        "name": "Prędkość koszenia",
+        "state": {
+          "quick": "Wydajność (0,5 m/s)",
+          "delicate": "Delikatne (0,35 m/s)"
+        }
+      },
+      "obstacle_avoidance": {
+        "name": "Omijanie przeszkód",
+        "state": {
+          "short_grass": "Niska trawa",
+          "general": "Standardowe",
+          "bumpy_tall_grass": "Wysoka lub nierówna trawa"
+        }
+      }
+    },
+    "sensor": {
+      "battery_current": {
+        "name": "Prąd baterii"
+      },
+      "battery_level": {
+        "name": "Poziom baterii"
+      },
+      "battery_temperature": {
+        "name": "Temperatura baterii"
+      },
+      "battery_voltage": {
+        "name": "Napięcie baterii"
+      },
+      "debug_capture": {
+        "name": "Zapis diagnostyczny"
+      },
+      "error": {
+        "name": "Błąd"
+      },
+      "goat_model_line": {
+        "name": "Model kosiarki"
+      },
+      "lifespan_blade": {
+        "name": "Żywotność ostrzy"
+      },
+      "lifespan_lens_brush": {
+        "name": "Żywotność szczotki lidaru"
+      },
+      "live_map": {
+        "name": "Mapa na żywo"
+      },
+      "motor_voltage": {
+        "name": "Napięcie silnika"
+      },
+      "network_ip": {
+        "name": "Adres IP"
+      },
+      "network_rssi": {
+        "name": "Siła sygnału Wi-Fi"
+      },
+      "network_ssid": {
+        "name": "Sieć Wi-Fi"
+      },
+      "protection_state": {
+        "name": "Aktywne blokady"
+      },
+      "stats_area": {
+        "name": "Skoszona powierzchnia"
+      },
+      "stats_job_area": {
+        "name": "Powierzchnia do skoszenia"
+      },
+      "stats_progress": {
+        "name": "Postęp koszenia"
+      },
+      "stats_time": {
+        "name": "Czas koszenia"
+      },
+      "system_voltage": {
+        "name": "Napięcie systemowe"
+      },
+      "total_stats_area": {
+        "name": "Łączna skoszona powierzchnia"
+      },
+      "total_stats_cleanings": {
+        "name": "Liczba koszeń"
+      },
+      "total_stats_time": {
+        "name": "Łączny czas koszenia"
+      }
+    },
+    "switch": {
+      "ai_recognition": {
+        "name": "Rozpoznawanie AI"
+      },
+      "animal_protection": {
+        "name": "Ochrona zwierząt"
+      },
+      "auto_cut_direction": {
+        "name": "Cotygodniowa zmiana kierunku"
+      },
+      "border_switch": {
+        "name": "Koszenie krawędzi"
+      },
+      "cross_map_border_warning": {
+        "name": "Alarm przekroczenia granicy"
+      },
+      "move_up_warning": {
+        "name": "Alarm podniesienia"
+      },
+      "rain_sensor": {
+        "name": "Czujnik deszczu"
+      },
+      "safer_mode": {
+        "name": "Blokada rodzicielska"
+      }
+    },
+    "time": {
+      "animal_protection_end": {
+        "name": "Ochrona zwierząt do"
+      },
+      "animal_protection_start": {
+        "name": "Ochrona zwierząt od"
+      }
+    }
+  }
+}

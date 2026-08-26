@@ -18,6 +18,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .debug_capture import DebugCaptureStore
 from .goat_models import classify_goat_variant
+from .map_outline import outline_from_coverage
 from .mower_profiles import MapDialect, profile_for_model
 from .mower_compat import (
     ProtocolProfile,
@@ -33,8 +34,20 @@ from .mower_messages import (
     apply_command_data,
     apply_mqtt_payload,
     apply_response,
+    body_data,
+    decode_payload,
+    merge_info_chunks,
 )
-from .mower_models import MapPosition, MowerActivity, MowerDevice, MowerState
+from .mower_models import (
+    AreaParameter,
+    MapPosition,
+    MowerActivity,
+    MowerDevice,
+    MowerMap,
+    MowerMapTrace,
+    MowerState,
+    MowerZone,
+)
 from .mower_mqtt import MowerAppPresenceMqttClient, MowerMqttClient
 
 _LOGGER = logging.getLogger(__name__)
@@ -60,6 +73,8 @@ AUTO_LIVE_MAP_KEEPALIVE_SECONDS = 180
 # cleanState.content.type of the edge-trimming job (captured from the app's
 # border-cut mode on an O1200 LiDAR Pro).
 EDGE_TRIM_CONTENT_TYPE = "borderrotate"
+# Recompute the coverage outline after the track grows by this many points.
+OUTLINE_RECOMPUTE_POINT_DELTA = 25
 # Volume scale reported by getVolume when the mower has not answered yet.
 VOLUME_DEFAULT_TOTAL = 10
 # Settings field -> setVolume payload key.
@@ -179,8 +194,11 @@ STARTUP_GET_INFO_GROUPS = (
         "getGeolocation",
         "getChildLock",
         "getBorderSwitch",
-        # O-series per-zone mowing parameters (cutting height level); mowers
-        # that do not speak it are degraded gracefully by the getInfo fallback.
+    ),
+    # O-series reads kept in their own group: a mower that rejects one of them
+    # can fail the whole batch without raising, which would silently blank the
+    # established settings if they shared a group.
+    (
         "getAreaParameter",
         "getAutoCutDirection",
         "getVolume",
@@ -222,6 +240,7 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
             get_pos_fields=self._capability.position_fields,
         )
         self._last_mqtt_at: float | None = None
+        self._info_chunks: dict[str, dict[int, str]] = {}
         self._last_position_mqtt_at: float | None = None
         self._last_position_heading: float | None = None
         self._last_position_path_heading: float | None = None
@@ -247,7 +266,11 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
         self._map_history_store: Store[dict[str, Any]] = Store(
             hass, MAP_HISTORY_STORE_VERSION, store_key
         )
-        self._saved_position_history: tuple[MapPosition, ...] = ()
+        self._saved_map_snapshot: tuple[Any, ...] | None = None
+        # Learned setAreaParameter payload shape ("flat" or "wrapped").
+        self._area_parameter_write_shape: str | None = None
+        # Track length at the last coverage-outline computation.
+        self._outline_source_points = 0
         self._mqtt = MowerMqttClient(
             api,
             device,
@@ -264,13 +287,31 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
 
     async def async_start(self) -> None:
         """Start push subscription after initial state refresh."""
-        position_history = await self._async_load_position_history()
-        if position_history:
+        stored_map = await self._async_load_map_history()
+        if stored_map is not None:
             self.data = replace(
                 self.data,
-                map=replace(self.data.map, position_history=position_history),
+                map=replace(
+                    self.data.map,
+                    mid=stored_map.mid or self.data.map.mid,
+                    current_position=stored_map.current_position
+                    or self.data.map.current_position,
+                    position_history=stored_map.position_history,
+                    trace=replace(
+                        self.data.map.trace, path=stored_map.trace.path
+                    ),
+                    zones=stored_map.zones,
+                    charge_positions=stored_map.charge_positions,
+                ),
             )
-            self._saved_position_history = position_history
+            self._saved_map_snapshot = (
+                stored_map.position_history,
+                stored_map.trace.path,
+                stored_map.zones,
+                stored_map.mid,
+                stored_map.charge_positions,
+                stored_map.current_position,
+            )
         await self.async_config_entry_first_refresh()
         await self._mqtt.start()
         self._stop_unsub = self.hass.bus.async_listen_once(
@@ -348,7 +389,7 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
         self._startup_live_map_task = None
         self._outcome_refresh_tasks.clear()
         await self._app_presence_mqtt.stop()
-        await self._map_history_store.async_save(self._position_history_payload())
+        await self._map_history_store.async_save(self._map_history_payload())
         await self._mqtt.stop()
 
     async def _async_handle_hass_stop(self, _event: Event) -> None:
@@ -356,49 +397,90 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
         self._stop_unsub = None
         await self.async_stop()
 
-    def async_set_updated_data(self, data: MowerState) -> None:
-        """Set coordinator data and persist the last mowing path."""
-        super().async_set_updated_data(data)
-        self._schedule_position_history_save(data.map.position_history)
-
     @property
     def debug_capture(self) -> DebugCaptureStore:
         """Return the shared debug capture store."""
         assert self._debug_capture is not None
         return self._debug_capture
 
-    async def _async_load_position_history(self) -> tuple[MapPosition, ...]:
-        """Restore the last mowing path from HA storage."""
+    async def _async_load_map_history(self) -> MowerMap | None:
+        """Restore the persisted map geometry from HA storage."""
         stored = await self._map_history_store.async_load()
         if not isinstance(stored, dict):
-            return ()
-        return tuple(
-            position
-            for item in stored.get("position_history", [])
+            return None
+
+        def positions(value: Any) -> tuple[MapPosition, ...]:
+            if not isinstance(value, list):
+                return ()
+            return tuple(
+                position
+                for item in value
+                if isinstance(item, dict)
+                for position in (MapPosition.from_payload(item),)
+                if position is not None
+            )
+
+        zones = tuple(
+            MowerZone(
+                zone_id=str(item.get("zone_id")),
+                anchor=anchor,
+                boundary_code=str(item.get("boundary_code") or ""),
+                polygon=positions(item.get("polygon")),
+            )
+            for item in stored.get("zones", [])
             if isinstance(item, dict)
-            for position in (MapPosition.from_payload(item),)
-            if position is not None
+            for anchor in (MapPosition.from_payload(item.get("anchor") or {}),)
+            if anchor is not None
+        )
+        mid = stored.get("mid")
+        current = stored.get("current_position")
+        return MowerMap(
+            mid=str(mid) if mid else None,
+            current_position=MapPosition.from_payload(current)
+            if isinstance(current, dict)
+            else None,
+            position_history=positions(stored.get("position_history")),
+            trace=MowerMapTrace(path=positions(stored.get("trace_path"))),
+            zones=zones,
+            charge_positions=positions(stored.get("charge_positions")),
         )
 
-    def _schedule_position_history_save(
-        self, position_history: tuple[MapPosition, ...]
-    ) -> None:
-        """Debounce writes of the last mowing path to HA storage."""
-        if position_history == self._saved_position_history:
+    def _schedule_map_history_save(self, mower_map: MowerMap) -> None:
+        """Debounce writes of the persisted map geometry to HA storage."""
+        snapshot = (
+            mower_map.position_history,
+            mower_map.trace.path,
+            mower_map.zones,
+            mower_map.mid,
+            mower_map.charge_positions,
+            mower_map.current_position,
+        )
+        if snapshot == self._saved_map_snapshot:
             return
-        self._saved_position_history = position_history
+        self._saved_map_snapshot = snapshot
         self._map_history_store.async_delay_save(
-            self._position_history_payload,
+            self._map_history_payload,
             MAP_HISTORY_STORE_DELAY_SECONDS,
         )
 
-    def _position_history_payload(self) -> dict[str, Any]:
+    def _map_history_payload(self) -> dict[str, Any]:
         """Return the persisted map history payload."""
-        position_history = self.data.map.position_history if self.data else ()
+        mower_map = self.data.map if self.data else MowerMap()
         return {
+            "mid": mower_map.mid,
             "position_history": [
-                position.as_dict() for position in position_history
+                position.as_dict() for position in mower_map.position_history
             ],
+            "trace_path": [
+                position.as_dict() for position in mower_map.trace.path
+            ],
+            "zones": [zone.as_dict() for zone in mower_map.zones],
+            "charge_positions": [
+                position.as_dict() for position in mower_map.charge_positions
+            ],
+            "current_position": mower_map.current_position.as_dict()
+            if mower_map.current_position
+            else None,
         }
 
     async def _async_update_data(self) -> MowerState:
@@ -444,6 +526,9 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
                     )
                     return
                 self._last_mqtt_at = now
+                if command == "onInfo":
+                    self._apply_info_chunk(payload)
+                    return
                 previous_state = self.data
                 state = apply_mqtt_payload(self.data, topic, payload)
                 if command == "onPos":
@@ -485,6 +570,24 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
                 )
 
         self.hass.loop.call_soon_threadsafe(update_state)
+
+    def _apply_info_chunk(self, payload: bytes) -> None:
+        """Buffer a chunked ``onInfo`` reply and apply it once complete.
+
+        Grouped ``getInfo`` replies larger than the MQTT payload limit arrive
+        split across ``onInfo`` fragments instead of the HTTP response, so
+        without reassembly every setting in that group stays unknown.
+        """
+        message = decode_payload(payload)
+        merged = merge_info_chunks(self._info_chunks, body_data(message))
+        if merged is None:
+            return
+        state = apply_command_data(self.data, "getInfo", body_data(merged))
+        self.async_set_updated_data(state)
+        self._capture_event(
+            "info_chunks_applied",
+            {"commands": sorted(body_data(merged) or {})},
+        )
 
     def _should_accept_trace_mqtt(self) -> bool:
         """Return whether an incoming mower trace push should update HA state."""
@@ -556,12 +659,14 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
         return previous is None or previous.map.trace.path != current.map.trace.path
 
     def async_set_updated_data(self, data: MowerState) -> None:
-        """Publish new state, clearing the mowed track when a new job starts.
+        """Publish new state; reset the track on new jobs and persist the map.
 
         O-series mowers accumulate the ``onMapTrack`` track across pushes; the
         track belongs to one mowing task, so a task-id change (a new job
         started from the app or schedule) resets it. Mid-job recharge resumes
-        keep the same task id and therefore keep the track.
+        keep the same task id and therefore keep the track. The path, track,
+        and zone geometry are then persisted (debounced) so the map survives
+        Home Assistant restarts.
         """
         previous = self.data
         if (
@@ -577,7 +682,37 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
                     data.map, trace=replace(data.map.trace, path=())
                 ),
             )
+        data = self._maybe_update_outline(data)
         super().async_set_updated_data(data)
+        self._schedule_map_history_save(data.map)
+
+    def _maybe_update_outline(self, data: MowerState) -> MowerState:
+        """Refresh the coverage-derived lawn outline when the track grew.
+
+        The mower never broadcasts its base-map outline, but the accumulated
+        ``onMapTrack`` coverage is the mowing area itself, so its boundary is
+        the outline the app paints. Recomputed only after meaningful growth to
+        keep the work off the hot path.
+        """
+        # The onMapTrack windows are patchy, so combine them with the live
+        # position history — both are places the mower actually drove.
+        coverage = (*data.map.trace.path, *data.map.position_history)
+        if (
+            data.map.info.outline
+            and abs(len(coverage) - self._outline_source_points)
+            < OUTLINE_RECOMPUTE_POINT_DELTA
+        ):
+            return data
+        outline = outline_from_coverage(coverage)
+        self._outline_source_points = len(coverage)
+        if not outline:
+            return data
+        return replace(
+            data,
+            map=replace(
+                data.map, info=replace(data.map.info, outline=outline)
+            ),
+        )
 
     def _compact_live_position_segment(self, state: MowerState) -> MowerState:
         """Keep the live position segment since the last trace commit."""
@@ -952,6 +1087,18 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
 
         self._last_live_position_stream_request_at = now
         state = await self._async_refresh_live_position(state)
+
+        if self._capability.map_dialect is MapDialect.MAP_RTK:
+            # O-series map layers are requested with their own dialect; the
+            # geometry then arrives on the onMI / onArI / onMapTrack pushes
+            # this request opens.
+            state = await self._async_refresh_rtk_map(state)
+            self._capture_event(
+                "live_position_stream_requested",
+                {"reason": reason, "force": force, "mid": state.map.mid, "dialect": "rtk"},
+            )
+            return state
+
         mid = state.map.mid
         if not mid:
             self._capture_event(
@@ -1637,12 +1784,17 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
             else parameter
             for parameter in parameters
         )
-        payload = {
-            "areaParameters": [parameter.as_payload() for parameter in updated]
-        }
-        await self.control("setAreaParameter", payload, refresh_if_stale=False)
+        await self._async_set_area_parameters(updated)
         self.async_set_updated_data(
-            apply_command_data(self.data, "onAreaParameter", payload)
+            apply_command_data(
+                self.data,
+                "onAreaParameter",
+                {
+                    "areaParameters": [
+                        parameter.as_payload() for parameter in updated
+                    ]
+                },
+            )
         )
         self._schedule_outcome_poll(
             "set_area_mow_height",
@@ -1652,6 +1804,50 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
                 for parameter in state.settings.area_parameters
             ),
         )
+
+    async def _async_set_area_parameters(
+        self, parameters: tuple[AreaParameter, ...]
+    ) -> None:
+        """Write AreaParameters, probing the accepted payload shape.
+
+        The readback push wraps records in ``areaParameters``, but the mower
+        rejects that same shape on write with "areaID is null", so the flat
+        single-record body is tried first; accepted shapes are remembered.
+        """
+        candidates: list[Any] = []
+        if self._area_parameter_write_shape != "wrapped":
+            candidates.append(("flat", parameters[0].as_payload()))
+        candidates.append(
+            (
+                "wrapped",
+                {
+                    "areaParameters": [
+                        parameter.as_payload() for parameter in parameters
+                    ]
+                },
+            )
+        )
+
+        last_error: EcovacsApiError | None = None
+        for shape, payload in candidates:
+            try:
+                await self.control(
+                    "setAreaParameter", payload, refresh_if_stale=False
+                )
+            except EcovacsApiError as err:
+                last_error = err
+                self._capture_event(
+                    "set_area_parameter_shape_rejected",
+                    {"shape": shape, "exception": repr(err)},
+                )
+                continue
+            self._area_parameter_write_shape = shape
+            self._capture_event(
+                "set_area_parameter_shape_accepted", {"shape": shape}
+            )
+            return
+        assert last_error is not None
+        raise last_error
 
     async def set_volume(self, key: str, level: int) -> None:
         """Set one speaker volume level (0..volume_total).
@@ -1717,9 +1913,11 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
         )
 
     async def set_mowing_efficiency(self, option: str) -> None:
-        """Set mowing efficiency."""
+        """Set the mowing speed."""
         await self.async_refresh_if_stale()
-        level = MOWING_EFFICIENCY_LEVELS[option]
+        level = self._capability.cut_efficiency_levels.get(
+            option, MOWING_EFFICIENCY_LEVELS[option]
+        )
         await self.control(
             "setCutEfficiency", {"level": level}, refresh_if_stale=False
         )

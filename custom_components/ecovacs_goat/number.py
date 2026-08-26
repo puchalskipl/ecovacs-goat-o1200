@@ -47,7 +47,7 @@ class MowerNumberDescription(NumberEntityDescription):
 NUMBERS: tuple[MowerNumberDescription, ...] = (
     MowerNumberDescription(
         key="rain_delay",
-        name="Rain delay",
+        translation_key="rain_delay",
         value_fn=lambda state: state.settings.rain_delay,
         native_min_value=0,
         native_max_value=1440,
@@ -58,7 +58,7 @@ NUMBERS: tuple[MowerNumberDescription, ...] = (
     ),
     MowerNumberDescription(
         key="cut_direction",
-        name="Cut direction",
+        translation_key="cut_direction",
         value_fn=lambda state: state.settings.cut_direction,
         native_min_value=0,
         native_max_value=180,
@@ -69,7 +69,7 @@ NUMBERS: tuple[MowerNumberDescription, ...] = (
     ),
     MowerNumberDescription(
         key="volume",
-        name="Volume",
+        translation_key="volume",
         value_fn=lambda state: state.settings.volume,
         native_min_value=0,
         native_max_value=VOLUME_MAX_LEVEL,
@@ -79,7 +79,7 @@ NUMBERS: tuple[MowerNumberDescription, ...] = (
     ),
     MowerNumberDescription(
         key="fall_volume",
-        name="Lift alarm volume",
+        translation_key="fall_volume",
         value_fn=lambda state: state.settings.fall_volume,
         native_min_value=0,
         native_max_value=VOLUME_MAX_LEVEL,
@@ -89,7 +89,7 @@ NUMBERS: tuple[MowerNumberDescription, ...] = (
     ),
     MowerNumberDescription(
         key="search_volume",
-        name="Find mower volume",
+        translation_key="search_volume",
         value_fn=lambda state: state.settings.search_volume,
         native_min_value=0,
         native_max_value=VOLUME_MAX_LEVEL,
@@ -100,7 +100,7 @@ NUMBERS: tuple[MowerNumberDescription, ...] = (
     ),
     MowerNumberDescription(
         key="cutting_height",
-        name="Cutting height",
+        translation_key="cutting_height",
         value_fn=_cutting_height_mm,
         native_min_value=CUT_HEIGHT_MIN_MM,
         native_max_value=CUT_HEIGHT_MAX_MM,

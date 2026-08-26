@@ -5,6 +5,7 @@ O1200 LiDAR Pro (firmware 2.13.10, 2026-08).
 """
 
 import base64
+from dataclasses import replace
 import json
 import lzma
 from pathlib import Path
@@ -214,7 +215,7 @@ def test_area_parameter_payload_round_trip() -> None:
         area_id=1, mow_height_level=6, cut_mode=7, obstacle_height=2, angle=270
     )
     assert parameter.as_payload() == {
-        "areaID": 1,
+        "areaID": "1",
         "mowHeightLevel": 6,
         "cutMode": 7,
         "obstacleHeight": 2,
@@ -289,6 +290,118 @@ def test_cutting_height_bounds_match_calibrated_levels() -> None:
     assert (CUT_HEIGHT_MAX_MM - CUT_HEIGHT_MIN_MM) % CUT_HEIGHT_STEP_MM == 0
 
 
+def test_chunked_on_info_reply_is_reassembled() -> None:
+    """Large grouped getInfo replies arrive split across onInfo fragments.
+
+    The mower splits any reply over the MQTT payload limit into
+    ``{d_id, d_seq, d_sum, d_val}`` text fragments; only the concatenation is
+    valid JSON, so without reassembly every setting in that group is lost.
+    """
+    reply = json.dumps(
+        {
+            "header": {"tzm": 120},
+            "body": {
+                "code": 0,
+                "msg": "ok",
+                "data": {
+                    "getAnimProtect": {
+                        "data": {"enable": 1, "start": "21:0", "end": "8:0"},
+                        "code": 0,
+                    },
+                    "getRainDelay": {"data": {"enable": 1, "delay": 180}, "code": 0},
+                },
+            },
+        }
+    )
+    half = len(reply) // 2
+    store: dict[str, dict[int, str]] = {}
+
+    assert (
+        mower_messages.merge_info_chunks(
+            store, {"d_id": "903583", "d_seq": "0", "d_sum": "2", "d_val": reply[:half]}
+        )
+        is None
+    )
+    assert store, "the first fragment must be buffered"
+
+    merged = mower_messages.merge_info_chunks(
+        store, {"d_id": "903583", "d_seq": "1", "d_sum": "2", "d_val": reply[half:]}
+    )
+    assert merged is not None
+    assert not store, "a completed batch must be dropped from the buffer"
+
+    state = apply_command_data(
+        MowerState(), "getInfo", mower_messages.body_data(merged)
+    )
+    assert state.settings.animal_enabled is True
+    assert state.settings.animal_start == "21:00"
+    assert state.settings.rain_delay == 180
+
+
+def test_out_of_order_info_fragments_still_merge() -> None:
+    """Fragments may arrive out of order; d_seq defines the assembly order."""
+    reply = json.dumps({"body": {"data": {"getRainDelay": {"data": {"delay": 90}}}}})
+    half = len(reply) // 2
+    store: dict[str, dict[int, str]] = {}
+
+    assert (
+        mower_messages.merge_info_chunks(
+            store, {"d_id": "1", "d_seq": "1", "d_sum": "2", "d_val": reply[half:]}
+        )
+        is None
+    )
+    merged = mower_messages.merge_info_chunks(
+        store, {"d_id": "1", "d_seq": "0", "d_sum": "2", "d_val": reply[:half]}
+    )
+    assert merged is not None
+    state = apply_command_data(
+        MowerState(), "getInfo", mower_messages.body_data(merged)
+    )
+    assert state.settings.rain_delay == 90
+
+
+def test_protect_state_does_not_overwrite_settings() -> None:
+    """Regression: runtime protection flags must not clobber the settings.
+
+    ``getProtectState`` reports whether a protection is active *right now*;
+    animal protection with a 21:00-08:00 window reports 0 at midday. Letting
+    it write ``animal_enabled`` flipped the switch back off seconds after the
+    app turned it on.
+    """
+    state = _mqtt(
+        MowerState(),
+        "onAnimProtect",
+        {"enable": 1, "start": "21:00", "end": "08:00"},
+    )
+    assert state.settings.animal_enabled is True
+
+    state = _mqtt(
+        state,
+        "onProtectState",
+        {
+            "isAnimProtect": 0,
+            "isRainProtect": 0,
+            "isRainDelay": 0,
+            "isEStop": 0,
+            "isLocked": 0,
+        },
+    )
+    assert state.settings.animal_enabled is True
+    assert state.settings.animal_start == "21:00"
+    assert state.protections.animal_active is False
+    assert state.protections.emergency_stop is False
+
+
+def test_protect_state_keeps_child_lock_setting() -> None:
+    """``isLocked`` is a runtime flag; the safer-mode setting owns its value."""
+    state = _mqtt(MowerState(), "onChildLock", {"on": 1})
+    assert state.settings.safer_mode is True
+
+    state = _mqtt(state, "onProtectState", {"isLocked": 0})
+    assert state.settings.safer_mode is True
+    assert state.protections.locked is False
+
+
 def test_auto_cut_direction_toggle() -> None:
     """onAutoCutDirection carries the weekly direction-change setting."""
     state = _mqtt(MowerState(), "onAutoCutDirection", {"enable": 0})
@@ -352,6 +465,35 @@ def test_clean_info_reports_edge_trim_work_mode() -> None:
         state, "onCleanInfo", {"trigger": "none", "state": "idle"}
     )
     assert state.clean_type is None
+
+
+def test_docked_zero_position_is_the_charging_station() -> None:
+    """A docked mower reports (0, 0) — the map origin IS the station.
+
+    The marker moves to the dock, the station location is learned from it
+    (``chargePos`` itself always comes back invalid), and the dock point stays
+    out of the mowing trail so the path does not draw a line to the origin.
+    """
+    state = replace(MowerState(), activity=MowerActivity.MOWING)
+    state = _mqtt(
+        state,
+        "onPos",
+        {"deebotPos": {"x": -940, "y": -441, "a": -34, "invalid": 0}, "mid": "0"},
+    )
+    assert state.map.position_history
+
+    state = _mqtt(
+        state,
+        "onPos",
+        {"deebotPos": {"x": 0, "y": 0, "a": 0, "invalid": 0}, "mid": "0"},
+    )
+    assert state.map.current_position.x == 0
+    assert state.map.current_position.y == 0
+    assert state.map.charge_positions == (MapPosition(x=0, y=0),)
+    # The dock point must not extend the mowing trail.
+    assert state.map.position_history[-1] == MapPosition(
+        x=-940, y=-441, a=-34, invalid=0
+    )
 
 
 def test_position_placeholder_mid_does_not_wipe_geometry() -> None:

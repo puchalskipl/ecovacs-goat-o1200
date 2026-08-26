@@ -109,8 +109,13 @@ class AreaParameter:
         }
 
     def as_payload(self) -> dict[str, Any]:
-        """Return the ECOVACS ``AreaParameters`` record shape."""
-        payload: dict[str, Any] = {"areaID": self.area_id}
+        """Return the ECOVACS ``AreaParameters`` record shape.
+
+        ``areaID`` is serialised as a string — that is how the mower's own
+        ``onAreaParameter`` pushes encode it, and the firmware's strict parser
+        reports "areaID is null" when it receives a number instead.
+        """
+        payload: dict[str, Any] = {"areaID": str(self.area_id)}
         if self.mow_height_level is not None:
             payload["mowHeightLevel"] = self.mow_height_level
         if self.cut_mode is not None:
@@ -392,6 +397,22 @@ def _sample_positions(
 
 
 @dataclass(frozen=True)
+class MowerProtections:
+    """Runtime protection flags from getProtectState.
+
+    These say whether a protection is *active right now* — not whether its
+    setting is enabled. Animal protection with a 21:00-08:00 window reports
+    ``animal_active=False`` at midday while the setting itself is on.
+    """
+
+    animal_active: bool | None = None
+    rain_active: bool | None = None
+    rain_delay_active: bool | None = None
+    emergency_stop: bool | None = None
+    locked: bool | None = None
+
+
+@dataclass(frozen=True)
 class MowerTelemetry:
     """Firmware telemetry pushed via ``onFwBuryPoint-bd_*`` topics.
 
@@ -426,6 +447,7 @@ class MowerState:
     network: NetworkInfo = field(default_factory=NetworkInfo)
     settings: MowerSettings = field(default_factory=MowerSettings)
     stats: MowerStats = field(default_factory=MowerStats)
+    protections: MowerProtections = field(default_factory=MowerProtections)
     telemetry: MowerTelemetry = field(default_factory=MowerTelemetry)
     map: MowerMap = field(default_factory=MowerMap)
     lifespans: dict[str, float] = field(default_factory=dict)

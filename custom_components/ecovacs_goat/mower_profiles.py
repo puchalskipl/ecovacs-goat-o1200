@@ -83,6 +83,8 @@ class CapabilityProfile:
     clean_info_command: str
     # Fields requested via getPos (UWB vs RTK reference points).
     position_fields: tuple[str, ...]
+    # setCutEfficiency levels for this family, keyed by mowing-speed option.
+    cut_efficiency_levels: dict[str, int]
     experimental: bool
     label: str
 
@@ -108,6 +110,7 @@ class CapabilityProfile:
             "clean_command": self.clean_command,
             "clean_info_command": self.clean_info_command,
             "position_fields": list(self.position_fields),
+            "cut_efficiency_levels": dict(self.cut_efficiency_levels),
             "experimental": self.experimental,
             "label": self.label,
         }
@@ -125,6 +128,7 @@ _G1_PROFILE = CapabilityProfile(
     clean_always_content=False,
     clean_info_command="getCleanInfo_V2",
     position_fields=("chargePos", "deebotPos", "uwbPos"),
+    cut_efficiency_levels={"quick": 1, "delicate": 2},
     experimental=False,
     label="GOAT G1 line (UWB, V2 map)",
 )
@@ -138,6 +142,8 @@ _O_SERIES_PROFILE = CapabilityProfile(
     clean_always_content=True,
     clean_info_command="getCleanInfo",
     position_fields=("deebotPos", "chargePos"),
+    # 4 = 0.5 m/s ("efficiency"), 7 = 0.35 m/s ("delicate").
+    cut_efficiency_levels={"quick": 4, "delicate": 7},
     experimental=False,
     label="GOAT O-series (RTK/LiDAR, validated on O1200 LiDAR Pro)",
 )
@@ -151,6 +157,7 @@ _UNKNOWN_PROFILE = CapabilityProfile(
     clean_always_content=False,
     clean_info_command="getCleanInfo_V2",
     position_fields=("chargePos", "deebotPos", "uwbPos"),
+    cut_efficiency_levels={"quick": 1, "delicate": 2},
     experimental=False,
     label="Unknown GOAT (assuming G1 / V2 map)",
 )

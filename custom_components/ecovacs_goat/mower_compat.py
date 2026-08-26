@@ -28,6 +28,16 @@ _LOGGER = logging.getLogger(__name__)
 # When a mower rejects getCleanInfo_V2, try legacy clean info (same apply_command_data path).
 GETINFO_CLEAN_FALLBACKS: dict[str, str] = {"getCleanInfo_V2": "getCleanInfo"}
 GETINFO_UNSUPPORTED_FAILURE_THRESHOLD = 3
+# O-series position replies carry this instead of the real map id.
+PLACEHOLDER_MAP_ID = "0"
+# ``getMI`` rejects an empty body with "no type" (code 20011). The push it
+# answers with carries ``type: "-1"``, so that shape is tried first; the
+# remaining variants cover firmware that expects an explicit map id.
+MAP_INFO_PAYLOADS: tuple[dict[str, Any], ...] = (
+    {"type": "-1"},
+    {"mid": "1", "type": "-1"},
+    {"type": "0"},
+)
 
 
 @dataclass(frozen=True)
@@ -181,19 +191,64 @@ async def refresh_rtk_map(
     Reads map build state, the fixed RTK base station, and the virtual-wall
     (``getMapTrack``) / area (``getAreaSet``) map-set layers, whose ``subsets``
     blobs decode with the shared LZMA decoder. Each call degrades gracefully on
-    failure. The base-map outline itself is pushed over MQTT, not returned here,
-    so it is not part of this poll. ``getAreaSet`` reuses the active map id that
-    the live position stream (``getPos``) already learned.
+    failure. The geometry itself (base map, zone boundaries, mowed track) is
+    pushed over MQTT rather than returned here.
+
+    ``getMI`` runs first because the position stream only reports the
+    placeholder map id ``"0"``; the real id arrives on the ``onMI`` push that
+    ``getMI`` triggers. Querying ``getAreaSet`` with ``"0"`` returns an empty
+    blob, so the area layer is skipped until a real id is known — the next
+    refresh picks it up.
     """
     for command, payload in (("getMapState", {}), ("getRTK", {})):
         state = await _rtk_map_call(api, device, state, command, payload, capture)
 
-    mid = state.map.mid or "0"
-    for command, payload in (
-        ("getMapTrack", {}),
-        ("getAreaSet", {"mid": mid, "aid": "0", "type": "ar"}),
-    ):
-        state = await _rtk_map_call(api, device, state, command, payload, capture)
+    state = await _refresh_map_info(api, device, state, capture)
+
+    # getMapTrack answers "fail" unless a job has produced a track; the live
+    # track otherwise arrives on onMapTrack pushes.
+    state = await _rtk_map_call(api, device, state, "getMapTrack", {}, capture)
+
+    mid = state.map.mid
+    if not mid or mid == PLACEHOLDER_MAP_ID:
+        if capture is not None:
+            capture("rtk_map_refresh_skipped", {"command": "getAreaSet", "mid": mid})
+        return state
+
+    return await _rtk_map_call(
+        api,
+        device,
+        state,
+        "getAreaSet",
+        {"mid": mid, "aid": "0", "type": "ar"},
+        capture,
+    )
+
+
+async def _refresh_map_info(
+    api: EcovacsMowerApi,
+    device: MowerDevice,
+    state: MowerState,
+    capture: Callable[[str, dict[str, Any]], None] | None,
+) -> MowerState:
+    """Ask for map info, learning the real map id from the ``onMI`` push.
+
+    The accepted request shape varies by firmware, so the known variants are
+    tried until one is answered; the winner is reported through ``capture`` so
+    a capture shows which shape this mower speaks.
+    """
+    for payload in MAP_INFO_PAYLOADS:
+        try:
+            response = await api.control(device, "getMI", payload)
+        except EcovacsApiError as err:
+            _LOGGER.debug("ECOVACS getMI %s rejected: %s", payload, err)
+            continue
+        if capture is not None:
+            capture("map_info_payload_accepted", {"payload": payload})
+        return apply_response(state, "getMI", response)
+
+    if capture is not None:
+        capture("map_info_unavailable", {"tried": list(MAP_INFO_PAYLOADS)})
     return state
 
 

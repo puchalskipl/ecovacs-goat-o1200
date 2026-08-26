@@ -25,6 +25,7 @@ const DEFAULT_CONFIG = {
   map_static_url: "/local/ecovacs_goat/map-info.json?v=202604272002",
   direction_entity: "number.mower_cut_direction",
   stop_button: "button.mower_end_mowing",
+  trim_button: "button.mower_start_edge_trimming",
   name: "Mower",
   // Break the live trail into segments when consecutive points are further
   // apart than this (map units); gaps come from slow-poll fallback, not travel.
@@ -33,6 +34,13 @@ const DEFAULT_CONFIG = {
   // wide polyline (O-series onMapTrack), "area" fills the closed trace shape
   // (G1 heading-gated trace).
   trace_style: "trail",
+  // Zone boundaries decoded from the mower's chain-coded records. Off until
+  // the per-map scale calibration is confirmed — wrongly scaled polygons
+  // stretch the viewport and push the real lawn into a corner.
+  show_zones: false,
+  // Zone anchor markers (getAreaSet "ar" records). Anchors of other lawns
+  // stretch the viewport the same way, so keep them off by default too.
+  show_areas: false,
 };
 
 const CARD_FORMAT_VERSION = "rounded-summary-v2";
@@ -41,14 +49,63 @@ const KEEPALIVE_DURATION_SECONDS = 600;
 const KEEPALIVE_COUNTDOWN_TICK_MS = 1000;
 
 const STATE_META = {
-  mowing: { label: "Mowing", className: "active", icon: "mdi:robot-mower" },
-  paused: { label: "Paused", className: "paused", icon: "mdi:pause-circle" },
-  docked: { label: "Docked", className: "docked", icon: "mdi:home-lightning-bolt" },
-  returning: { label: "Returning", className: "returning", icon: "mdi:home-import-outline" },
-  idle: { label: "Idle", className: "paused", icon: "mdi:map-marker-alert-outline" },
-  error: { label: "Error", className: "error", icon: "mdi:alert-circle" },
-  unavailable: { label: "Unavailable", className: "muted", icon: "mdi:cloud-alert" },
-  unknown: { label: "Unknown", className: "muted", icon: "mdi:help-circle" },
+  mowing: { label: "state_mowing", className: "active", icon: "mdi:robot-mower" },
+  paused: { label: "state_paused", className: "paused", icon: "mdi:pause-circle" },
+  docked: { label: "state_docked", className: "docked", icon: "mdi:home-lightning-bolt" },
+  returning: { label: "state_returning", className: "returning", icon: "mdi:home-import-outline" },
+  idle: { label: "state_idle", className: "paused", icon: "mdi:map-marker-alert-outline" },
+  error: { label: "state_error", className: "error", icon: "mdi:alert-circle" },
+  unavailable: { label: "state_unavailable", className: "muted", icon: "mdi:cloud-alert" },
+  unknown: { label: "state_unknown", className: "muted", icon: "mdi:help-circle" },
+};
+
+// UI strings per language; the card follows the Home Assistant profile
+// language and falls back to English.
+const I18N = {
+  en: {
+    state_mowing: "Mowing",
+    state_paused: "Paused",
+    state_docked: "Docked",
+    state_returning: "Returning",
+    state_idle: "Idle",
+    state_error: "Error",
+    state_unavailable: "Unavailable",
+    state_unknown: "Unknown",
+    start: "Start",
+    resume: "Resume",
+    pause: "Pause",
+    end: "End",
+    dock: "Dock",
+    cancel_dock: "Cancel Dock",
+    keepalive: "Keepalive",
+    trim: "Trim edges",
+    mowing_area: "Mowing area",
+    progress: "Progress",
+    battery: "Battery",
+    waiting_map: "Waiting for live map data",
+  },
+  pl: {
+    state_mowing: "Kosi",
+    state_paused: "Wstrzymana",
+    state_docked: "W stacji",
+    state_returning: "Wraca",
+    state_idle: "Bezczynna",
+    state_error: "Błąd",
+    state_unavailable: "Niedostępna",
+    state_unknown: "Nieznany",
+    start: "Start",
+    resume: "Wznów",
+    pause: "Wstrzymaj",
+    end: "Zakończ",
+    dock: "Do stacji",
+    cancel_dock: "Anuluj powrót",
+    keepalive: "Na żywo",
+    trim: "Przytnij krawędzie",
+    mowing_area: "Obszar koszenia",
+    progress: "Postęp",
+    battery: "Bateria",
+    waiting_map: "Oczekiwanie na dane mapy",
+  },
 };
 
 const ACTION_OUTCOMES = {
@@ -102,6 +159,16 @@ const ACTION_OUTCOMES = {
     retryAfterMs: 5000,
     timeoutMs: 30000,
     failureMessage: "Mower did not cancel docking.",
+  },
+  trim: {
+    domain: "button",
+    service: "press",
+    target: "trim_button",
+    optimisticState: "mowing",
+    expectedStates: ["mowing"],
+    retryAfterMs: 5000,
+    timeoutMs: 30000,
+    failureMessage: "Mower did not start edge trimming.",
   },
 };
 
@@ -496,19 +563,18 @@ class EcovacsGoatCard extends HTMLElement {
     const endDisabled = unavailable || returning || (!mowing && !paused && !errorState);
     const dockDisabled = unavailable || docked;
     const primaryAction = mowing ? "pause" : "start";
-    const primaryLabel = mowing ? "Pause" : paused ? "Resume" : "Start";
+    const primaryLabel = mowing
+      ? this._t("pause")
+      : paused
+        ? this._t("resume")
+        : this._t("start");
     const primaryIcon = mowing ? "mdi:pause" : "mdi:play";
     const primaryClass = mowing ? "pause" : "primary";
-    const dockLabel = returning ? "Cancel Dock" : "Dock";
+    const dockLabel = returning ? this._t("cancel_dock") : this._t("dock");
     const dockIcon = returning ? "mdi:home-export-outline" : "mdi:home-import-outline";
     const dockAction = returning ? "cancel_dock" : "dock";
-    const keepaliveRemaining = this._keepaliveRemainingSeconds();
-    const keepaliveActive = keepaliveRemaining > 0;
-    const keepaliveClass = keepaliveActive ? "keepalive-active" : "";
-    const keepaliveIcon = keepaliveActive ? "mdi:timer-sand" : "mdi:access-point-network";
-    const keepaliveLabel = keepaliveActive
-      ? this._formatKeepaliveRemaining(keepaliveRemaining)
-      : "Keepalive";
+    // Edge trimming is a standalone job: only startable while idle/docked.
+    const trimDisabled = unavailable || mowing || paused || returning;
 
     this.innerHTML = `
       <ha-card>
@@ -520,14 +586,14 @@ class EcovacsGoatCard extends HTMLElement {
           </div>
           <div class="chip ${chipClass}">
             <ha-icon icon="${meta.icon}"></ha-icon>
-            ${this._escape(meta.label)}
+            ${this._escape(this._t(meta.label))}
           </div>
         </div>
 
         <div class="summary">
-          ${this._metric("Mowing area", this._formatAreaState(area))}
-          ${this._metric("Progress", this._formatRoundedState(progress))}
-          ${this._metric("Battery", this._formatState(battery))}
+          ${this._metric(this._t("mowing_area"), this._formatAreaState(area))}
+          ${this._metric(this._t("progress"), this._formatRoundedState(progress))}
+          ${this._metric(this._t("battery"), this._formatState(battery))}
         </div>
 
         ${this._errorLine(error)}
@@ -541,15 +607,15 @@ class EcovacsGoatCard extends HTMLElement {
           </button>
           <button class="${this._buttonClass("stop", "end")}" data-action="end" ${endDisabled ? "disabled" : ""}>
             <ha-icon icon="mdi:stop"></ha-icon>
-            <span>End</span>
+            <span>${this._t("end")}</span>
           </button>
           <button class="${this._buttonClass("", dockAction)}" data-action="${dockAction}" ${dockDisabled ? "disabled" : ""}>
             <ha-icon icon="${dockIcon}"></ha-icon>
             <span>${dockLabel}</span>
           </button>
-          <button class="${this._buttonClass(keepaliveClass, "keepalive")}" data-action="keepalive">
-            <ha-icon icon="${keepaliveIcon}"></ha-icon>
-            <span>${keepaliveLabel}</span>
+          <button class="${this._buttonClass("", "trim")}" data-action="trim" ${trimDisabled ? "disabled" : ""}>
+            <ha-icon icon="mdi:scissors-cutting"></ha-icon>
+            <span>${this._t("trim")}</span>
           </button>
         </div>
 
@@ -572,8 +638,8 @@ class EcovacsGoatCard extends HTMLElement {
     this.querySelector('[data-action="cancel_dock"]')?.addEventListener("click", () =>
       this._runStateAction("cancel_dock")
     );
-    this.querySelector('[data-action="keepalive"]')?.addEventListener("click", () =>
-      this._runKeepaliveAction()
+    this.querySelector('[data-action="trim"]')?.addEventListener("click", () =>
+      this._runStateAction("trim")
     );
     this.querySelectorAll("[data-direction]").forEach((button) =>
       button.addEventListener("click", () =>
@@ -667,7 +733,7 @@ class EcovacsGoatCard extends HTMLElement {
       slot.innerHTML = "";
       this._lastMapStructureSignature = null;
     } else if (render.empty) {
-      slot.innerHTML = `<div class="map"><div class="map-empty">Waiting for live map data</div></div>`;
+      slot.innerHTML = `<div class="map"><div class="map-empty">${this._t("waiting_map")}</div></div>`;
       this._lastMapStructureSignature = null;
     } else {
       slot.innerHTML = `<div class="map">${this._buildMapSvgHtml(render)}</div>`;
@@ -720,7 +786,7 @@ class EcovacsGoatCard extends HTMLElement {
     });
     this._callAction(outcome.domain, outcome.service, entityId)
       .then(() => {
-        if (["start", "end", "dock", "cancel_dock"].includes(key)) {
+        if (["start", "end", "dock", "cancel_dock", "trim"].includes(key)) {
           this._startKeepalive(`card_${key}`);
         }
       })
@@ -1016,7 +1082,7 @@ class EcovacsGoatCard extends HTMLElement {
     }
     if (render.empty) {
       this._lastMapStructureSignature = null;
-      return `<div class="map"><div class="map-empty">Waiting for live map data</div></div>`;
+      return `<div class="map"><div class="map-empty">${this._t("waiting_map")}</div></div>`;
     }
     this._lastMapStructureSignature = render.structureSignature;
     return `<div class="map">${this._buildMapSvgHtml(render)}</div>`;
@@ -1142,11 +1208,12 @@ class EcovacsGoatCard extends HTMLElement {
     const livePath = this._positions(resolved.position_history);
     const tracePath = this._positions(resolved.tracePath);
     const mowedArea = tracePath;
-    const zonePolygons = Array.isArray(resolved.zones)
-      ? resolved.zones
-          .map((zone) => this._positions(zone?.polygon))
-          .filter((polygon) => polygon.length >= 3)
-      : [];
+    const zonePolygons =
+      this.config.show_zones && Array.isArray(resolved.zones)
+        ? resolved.zones
+            .map((zone) => this._positions(zone?.polygon))
+            .filter((polygon) => polygon.length >= 3)
+        : [];
     const charge = this._positions(resolved.charge_positions);
     const rawCurrent = this._position(resolved.current_position);
     const current = this._displayMowerPosition({
@@ -1156,7 +1223,9 @@ class EcovacsGoatCard extends HTMLElement {
     });
     const beacons = this._positions(resolved.uwb_positions);
     const rtkStation = this._position(resolved.rtk_station);
-    const areas = this._positions(resolved.areas);
+    const areas = this.config.show_areas
+      ? this._positions(resolved.areas)
+      : [];
     const noGoZones = this._polygons(resolved.no_go_zones);
 
     const points = [
@@ -1640,7 +1709,22 @@ class EcovacsGoatCard extends HTMLElement {
     };
   }
 
+  _t(key) {
+    const language = (
+      this._hass?.locale?.language ||
+      this._hass?.language ||
+      "en"
+    ).split("-")[0];
+    const table = I18N[language] || I18N.en;
+    return table[key] || I18N.en[key] || key;
+  }
+
   _directionControl(direction) {
+    // No configured (or resolvable) cut-direction entity: the dashboard
+    // exposes the setting elsewhere, so drop the whole control.
+    if (!direction) {
+      return "";
+    }
     const value = Number(direction?.state);
     const safeValue = Number.isFinite(value) ? Math.round(value) : 90;
     const pendingValue =
