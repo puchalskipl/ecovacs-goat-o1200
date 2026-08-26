@@ -63,7 +63,7 @@ VARIANT_FAMILIES: dict[str, str] = {
 }
 
 
-def classify_goat_g1_variant(device_name: str | None) -> str:
+def classify_goat_variant(device_name: str | None) -> str:
     """Map ECOVACS ``deviceName`` (nick/name) to a GOAT variant id.
 
     Matching is conservative: longer / more specific product tokens win over the
@@ -142,4 +142,4 @@ def variant_family(variant_id: str) -> str:
 
 def classify_goat_family(device_name: str | None) -> str:
     """Map ECOVACS ``deviceName`` directly to a coarse protocol family."""
-    return variant_family(classify_goat_g1_variant(device_name))
+    return variant_family(classify_goat_variant(device_name))

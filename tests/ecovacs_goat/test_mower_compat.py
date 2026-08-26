@@ -1,4 +1,4 @@
-"""Tests for eco-ng protocol compatibility helpers."""
+﻿"""Tests for eco-ng protocol compatibility helpers."""
 
 from pathlib import Path
 import sys
@@ -7,25 +7,25 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-PACKAGE_PATH = Path(__file__).parents[2] / "custom_components" / "ecovacs_goat_g1"
+PACKAGE_PATH = Path(__file__).parents[2] / "custom_components" / "ecovacs_goat"
 
 custom_components = types.ModuleType("custom_components")
 custom_components.__path__ = [str(PACKAGE_PATH.parent)]
 sys.modules.setdefault("custom_components", custom_components)
 
-ecovacs_goat_g1 = types.ModuleType("custom_components.ecovacs_goat_g1")
-ecovacs_goat_g1.__path__ = [str(PACKAGE_PATH)]
-sys.modules.setdefault("custom_components.ecovacs_goat_g1", ecovacs_goat_g1)
+ecovacs_goat = types.ModuleType("custom_components.ecovacs_goat")
+ecovacs_goat.__path__ = [str(PACKAGE_PATH)]
+sys.modules.setdefault("custom_components.ecovacs_goat", ecovacs_goat)
 
-from custom_components.ecovacs_goat_g1.mower_api import EcovacsApiError
-from custom_components.ecovacs_goat_g1.mower_compat import (
+from custom_components.ecovacs_goat.mower_api import EcovacsApiError
+from custom_components.ecovacs_goat.mower_compat import (
     GETINFO_UNSUPPORTED_FAILURE_THRESHOLD,
     ProtocolProfile,
     apply_resilient_getinfo_group,
     refresh_live_position,
     refresh_rtk_map,
 )
-from custom_components.ecovacs_goat_g1.mower_models import MowerMap, MowerState
+from custom_components.ecovacs_goat.mower_models import MowerMap, MowerState
 
 
 def _make_subset(obj) -> str:

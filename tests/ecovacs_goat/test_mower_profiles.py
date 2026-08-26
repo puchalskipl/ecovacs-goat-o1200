@@ -1,20 +1,20 @@
-"""Tests for GOAT capability profiles (per-model protocol selection)."""
+﻿"""Tests for GOAT capability profiles (per-model protocol selection)."""
 
 from pathlib import Path
 import sys
 import types
 
-PACKAGE_PATH = Path(__file__).parents[2] / "custom_components" / "ecovacs_goat_g1"
+PACKAGE_PATH = Path(__file__).parents[2] / "custom_components" / "ecovacs_goat"
 
 custom_components = types.ModuleType("custom_components")
 custom_components.__path__ = [str(PACKAGE_PATH.parent)]
 sys.modules.setdefault("custom_components", custom_components)
 
-ecovacs_goat_g1 = types.ModuleType("custom_components.ecovacs_goat_g1")
-ecovacs_goat_g1.__path__ = [str(PACKAGE_PATH)]
-sys.modules.setdefault("custom_components.ecovacs_goat_g1", ecovacs_goat_g1)
+ecovacs_goat = types.ModuleType("custom_components.ecovacs_goat")
+ecovacs_goat.__path__ = [str(PACKAGE_PATH)]
+sys.modules.setdefault("custom_components.ecovacs_goat", ecovacs_goat)
 
-from custom_components.ecovacs_goat_g1.mower_profiles import (
+from custom_components.ecovacs_goat.mower_profiles import (
     CapabilityProfile,
     MapDialect,
     MowerFamily,
@@ -35,12 +35,12 @@ def test_g1_profile_uses_v2_map_and_clean_v2() -> None:
 
 
 def test_o_series_profile_matches_o800_rtk_capture() -> None:
-    """O-series profile reflects the decrypted GOAT O800 RTK capture."""
+    """O-series profile reflects the O800 RTK and O1200 LiDAR Pro captures."""
     profile = profile_for_model("ECOVACS GOAT O1200")
     assert profile.family is MowerFamily.GOAT_O_SERIES
     assert profile.map_dialect is MapDialect.MAP_RTK
     assert profile.map_uses_v2 is False
-    assert profile.experimental is True
+    assert profile.experimental is False
     assert profile.clean_command == "clean"
     assert profile.clean_info_command == "getCleanInfo"
     assert profile.position_fields == ("deebotPos", "chargePos")
@@ -81,4 +81,4 @@ def test_profile_as_dict_is_serialisable() -> None:
     assert snapshot["family"] == "goat_o_series"
     assert snapshot["map_dialect"] == "map_rtk"
     assert snapshot["clean_command"] == "clean"
-    assert snapshot["experimental"] is True
+    assert snapshot["experimental"] is False

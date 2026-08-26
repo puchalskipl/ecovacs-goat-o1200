@@ -26,6 +26,13 @@ const DEFAULT_CONFIG = {
   direction_entity: "number.mower_cut_direction",
   stop_button: "button.mower_end_mowing",
   name: "Mower",
+  // Break the live trail into segments when consecutive points are further
+  // apart than this (map units); gaps come from slow-poll fallback, not travel.
+  trail_gap_limit: 500,
+  // How to paint the mower-reported trace: "trail" draws the mowed track as a
+  // wide polyline (O-series onMapTrack), "area" fills the closed trace shape
+  // (G1 heading-gated trace).
+  trace_style: "trail",
 };
 
 const CARD_FORMAT_VERSION = "rounded-summary-v2";
@@ -238,6 +245,20 @@ const STYLE = `
   .map-mowed-area {
     fill: #b9ee98;
     opacity: 0.55;
+  }
+  .map-mowed-trail {
+    fill: none;
+    stroke: #b9ee98;
+    stroke-width: 5;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    opacity: 0.5;
+  }
+  .map-zone {
+    fill: rgba(79, 154, 67, 0.15);
+    stroke: #6fbf62;
+    stroke-width: 1.5;
+    stroke-dasharray: 6 4;
   }
   .map-garden {
     fill: #4f9a43;
@@ -901,7 +922,7 @@ class EcovacsGoatCard extends HTMLElement {
       serviceData.duration_seconds = durationSeconds;
     }
     return this._hass
-      .callService("ecovacs_goat_g1", "request_live_position_stream", serviceData)
+      .callService("ecovacs_goat", "request_live_position_stream", serviceData)
       .catch((err) => {
         this._lastLiveStreamRequestAt = 0;
         if (surfaceErrors) {
@@ -1055,6 +1076,7 @@ class EcovacsGoatCard extends HTMLElement {
       keep("rtk_station", map.rtk_station);
       keep("areas", map.areas);
       keep("no_go_zones", map.no_go_zones);
+      keep("zones", map.zones);
     }
 
     const hasGeometry = Boolean(
@@ -1064,6 +1086,7 @@ class EcovacsGoatCard extends HTMLElement {
         model.uwb_positions?.length ||
         model.areas?.length ||
         model.no_go_zones?.length ||
+        model.zones?.length ||
         model.position_history?.length ||
         model.tracePath?.length ||
         model.current_position ||
@@ -1082,6 +1105,7 @@ class EcovacsGoatCard extends HTMLElement {
       rtk_station: model.rtk_station,
       areas: model.areas,
       no_go_zones: model.no_go_zones,
+      zones: model.zones,
     };
   }
 
@@ -1104,6 +1128,7 @@ class EcovacsGoatCard extends HTMLElement {
       resolved.rtk_station,
       resolved.areas,
       resolved.no_go_zones,
+      resolved.zones,
     ]);
   }
 
@@ -1117,6 +1142,11 @@ class EcovacsGoatCard extends HTMLElement {
     const livePath = this._positions(resolved.position_history);
     const tracePath = this._positions(resolved.tracePath);
     const mowedArea = tracePath;
+    const zonePolygons = Array.isArray(resolved.zones)
+      ? resolved.zones
+          .map((zone) => this._positions(zone?.polygon))
+          .filter((polygon) => polygon.length >= 3)
+      : [];
     const charge = this._positions(resolved.charge_positions);
     const rawCurrent = this._position(resolved.current_position);
     const current = this._displayMowerPosition({
@@ -1140,6 +1170,7 @@ class EcovacsGoatCard extends HTMLElement {
       ...(rtkStation ? [rtkStation] : []),
       ...areas,
       ...noGoZones.flat(),
+      ...zonePolygons.flat(),
     ];
     if (!points.length) {
       return { empty: true };
@@ -1171,6 +1202,11 @@ class EcovacsGoatCard extends HTMLElement {
       .filter(Boolean)
       .map((path) => `<path class="map-nogo" d="${path}"></path>`)
       .join("");
+    const zoneMarkup = zonePolygons
+      .map((polygon) => this._closedPath(polygon, bounds, width, height))
+      .filter(Boolean)
+      .map((path) => `<path class="map-zone" d="${path}"></path>`)
+      .join("");
     const areaMarkup = areas
       .map((position) => {
         const point = this._project(position, bounds, width, height);
@@ -1193,8 +1229,12 @@ class EcovacsGoatCard extends HTMLElement {
       : "";
 
     // Dynamic layers: change on (almost) every position update.
-    const mowedAreaPath = this._closedPath(mowedArea, bounds, width, height);
-    const liveSvgPath = this._path(livePath, bounds, width, height);
+    const traceAsArea = this.config.trace_style === "area";
+    const mowedAreaPath = traceAsArea
+      ? this._closedPath(mowedArea, bounds, width, height)
+      : this._trailPath(mowedArea, bounds, width, height);
+    const mowedAreaClass = traceAsArea ? "map-mowed-area" : "map-mowed-trail";
+    const liveSvgPath = this._trailPath(livePath, bounds, width, height);
     const currentPoint = current ? this._project(current, bounds, width, height) : null;
     const currentHeading = current
       ? this._mowerHeading(current, charge, livePath, mowerState)
@@ -1217,9 +1257,11 @@ class EcovacsGoatCard extends HTMLElement {
       obstacleMarkup,
       stationMarkup,
       noGoMarkup,
+      zoneMarkup,
       areaMarkup,
       beaconMarkup,
       rtkMarkup,
+      mowedAreaClass,
     ]);
 
     return {
@@ -1229,10 +1271,12 @@ class EcovacsGoatCard extends HTMLElement {
       obstacleMarkup,
       stationMarkup,
       noGoMarkup,
+      zoneMarkup,
       areaMarkup,
       beaconMarkup,
       rtkMarkup,
       mowedAreaPath,
+      mowedAreaClass,
       liveSvgPath,
       currentPoint,
       currentHeading,
@@ -1247,7 +1291,8 @@ class EcovacsGoatCard extends HTMLElement {
       <svg viewBox="0 0 ${render.width} ${render.height}" role="img" aria-label="Live mower map">
         ${render.gardenMarkup}
         ${render.obstacleMarkup}
-        <path class="map-mowed-area"${render.mowedAreaPath ? ` d="${render.mowedAreaPath}"` : ""}></path>
+        ${render.zoneMarkup}
+        <path class="${render.mowedAreaClass}" data-layer="mowed"${render.mowedAreaPath ? ` d="${render.mowedAreaPath}"` : ""}></path>
         <path class="map-trail"${render.liveSvgPath ? ` d="${render.liveSvgPath}"` : ""}></path>
         ${render.stationMarkup}
         ${render.noGoMarkup}
@@ -1267,7 +1312,7 @@ class EcovacsGoatCard extends HTMLElement {
       return false;
     }
 
-    const mowed = svg.querySelector(".map-mowed-area");
+    const mowed = svg.querySelector('[data-layer="mowed"]');
     if (mowed) {
       if (render.mowedAreaPath) {
         mowed.setAttribute("d", render.mowedAreaPath);
@@ -1393,6 +1438,31 @@ class EcovacsGoatCard extends HTMLElement {
   _closedPath(points, bounds, width, height) {
     const path = this._path(points, bounds, width, height);
     return path ? `${path} Z` : "";
+  }
+
+  // Like _path, but starts a new subpath whenever consecutive points are
+  // further apart than trail_gap_limit. Slow-poll fallback (one getPos per
+  // minute) leaves multi-metre holes in the history; connecting them draws
+  // long straight strokes across the map that the mower never drove.
+  _trailPath(points, bounds, width, height) {
+    if (points.length < 2) {
+      return "";
+    }
+    const gapLimit = Number(this.config.trail_gap_limit) || 0;
+    let previous = null;
+    return points
+      .map((position, index) => {
+        const point = this._project(position, bounds, width, height);
+        const gap =
+          index > 0 &&
+          gapLimit > 0 &&
+          previous &&
+          Math.hypot(position.x - previous.x, position.y - previous.y) > gapLimit;
+        previous = position;
+        const command = index === 0 || gap ? "M" : "L";
+        return `${command} ${point.x.toFixed(1)} ${point.y.toFixed(1)}`;
+      })
+      .join(" ");
   }
 
   _housePath(x, y) {
@@ -1555,6 +1625,11 @@ class EcovacsGoatCard extends HTMLElement {
     const x = Number(value.x);
     const y = Number(value.y);
     if (!Number.isFinite(x) || !Number.isFinite(y)) {
+      return null;
+    }
+    // Positions flagged invalid (LiDAR/RTK relocalisation glitches) draw as
+    // spikes teleporting across the map; drop them entirely.
+    if (Number(value.invalid)) {
       return null;
     }
     return {

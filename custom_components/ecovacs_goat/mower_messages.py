@@ -7,9 +7,11 @@ import binascii
 from dataclasses import replace
 import json
 import lzma
+import re
 from typing import Any
 
 from .mower_models import (
+    AreaParameter,
     MapPosition,
     MowerActivity,
     MowerMap,
@@ -18,6 +20,7 @@ from .mower_models import (
     MowerSettings,
     MowerState,
     MowerStats,
+    MowerZone,
     NetworkInfo,
 )
 
@@ -51,6 +54,25 @@ POSITION_HISTORY_ACTIVITIES = {
 # may switch the active map (and reset stale geometry); base-map / trace replies
 # merely contribute geometry for whichever map is already active.
 _ACTIVE_MAP_ID_COMMANDS = {"getPos", "onPos", "getUWB", "onUWB"}
+
+# O-series live track (onMapTrack pushes): cap the accumulated mowed path.
+O_SERIES_TRACK_MAX_POINTS = 4000
+# O-series zone boundaries (onArI): 8-direction chain code decoding. Both the
+# direction mapping and the step size are provisional best-effort values until
+# calibrated against the official app map; the raw chain code is kept on every
+# zone so polygons can be re-derived without another capture.
+ZONE_CHAIN_STEP = 500
+ZONE_CHAIN_DIRECTIONS = {
+    1: (0, 1),
+    2: (1, 1),
+    3: (1, 0),
+    4: (1, -1),
+    5: (0, -1),
+    6: (-1, -1),
+    7: (-1, 0),
+    8: (-1, 1),
+}
+_ZONE_CHAIN_TOKEN = re.compile(r"(\d)(?:\((\d+)\))?")
 
 
 def decode_payload(payload: str | bytes | bytearray | dict[str, Any]) -> dict[str, Any]:
@@ -164,6 +186,7 @@ def apply_command_data(state: MowerState, command: str, data: Any) -> MowerState
                 state = replace(
                     state,
                     activity=activity,
+                    clean_type=_clean_content_type(data),
                     charging=False if activity is MowerActivity.MOWING else state.charging,
                     task_id=_task_id(data, state.task_id),
                     map=mower_map,
@@ -247,12 +270,74 @@ def apply_command_data(state: MowerState, command: str, data: Any) -> MowerState
             if isinstance(data, dict):
                 state = replace(state, map=_map_info_data(state.map, data))
         case "getMapTrack" | "onMapTrack" | "getAreaSet" | "onAreaSet":
-            # O-series (RTK) map-set layers: virtual walls ("vw") and areas
-            # ("ar"). The ``subsets`` field is base64 + the same compact-LZMA
-            # wrapper used by the G1 V2 map, so it decodes with the shared
-            # decoder.
+            # O-series (RTK) map data arrives in two shapes: map-set layers
+            # with a ``subsets`` blob (virtual walls "vw", areas "ar"), and
+            # live track pushes with an ``info`` blob carrying a window of
+            # recently mowed coordinates. Both use the shared compact-LZMA
+            # wrapper.
             if isinstance(data, dict):
-                state = replace(state, map=_map_set_layer(state.map, data))
+                if isinstance(data.get("subsets"), str):
+                    state = replace(state, map=_map_set_layer(state.map, data))
+                elif isinstance(data.get("info"), str):
+                    state = replace(state, map=_map_track_push(state.map, data))
+                else:
+                    # Unknown reply shape (e.g. a bare acknowledgement): still
+                    # learn the map id like other O-series map replies.
+                    state = replace(state, map=_map_mid_only(state.map, data))
+        case "getArI" | "onArI":
+            # O-series zone boundaries: chain-coded polygons per mowing zone.
+            if isinstance(data, dict):
+                state = replace(state, map=_map_zones(state.map, data))
+        case "getAreaParameter" | "onAreaParameter":
+            # O-series per-zone mowing parameters (cutting height level, cut
+            # mode, obstacle height, per-zone cut direction).
+            if isinstance(data, dict):
+                parameters = _area_parameters(data.get("areaParameters"))
+                if parameters:
+                    settings = replace(state.settings, area_parameters=parameters)
+                    # O-series mowers manage obstacle avoidance per zone, so
+                    # keep the shared setting in sync with the first zone.
+                    obstacle_height = parameters[0].obstacle_height
+                    if obstacle_height is not None:
+                        settings = replace(
+                            settings,
+                            obstacle_avoidance=OBSTACLE_AVOIDANCE_BY_LEVEL.get(
+                                obstacle_height
+                            ),
+                        )
+                    state = replace(state, settings=settings)
+        case "onFwBuryPoint-bd_batterytemp":
+            if isinstance(data, dict):
+                state = replace(
+                    state,
+                    telemetry=replace(
+                        state.telemetry,
+                        battery_temperature=_int(data.get("temperature")),
+                    ),
+                )
+        case "onFwBuryPoint-bd_batteryinfo":
+            if isinstance(data, dict):
+                state = replace(
+                    state,
+                    telemetry=replace(
+                        state.telemetry,
+                        battery_level=_int(data.get("batteryLevel")),
+                        battery_current=_int(data.get("batteryCurrent")),
+                        battery_voltage=_int(data.get("batteryVoltage")),
+                    ),
+                )
+        case "onFwBuryPoint-bd_power":
+            if isinstance(data, dict):
+                state = replace(
+                    state,
+                    telemetry=replace(
+                        state.telemetry,
+                        system_voltage=_int(data.get("systemVoltage")),
+                        motor_voltage=_int(data.get("motorVoltage")),
+                        motor_drive_voltage=_int(data.get("motorDriveVoltage")),
+                        core_plate_voltage=_int(data.get("corePlateVoltage")),
+                    ),
+                )
         case (
             "getMapState"
             | "onMapState"
@@ -374,6 +459,36 @@ def apply_command_data(state: MowerState, command: str, data: Any) -> MowerState
                         cut_direction=_int(data.get("angle")),
                     ),
                 )
+        case "getVolume" | "onVolume":
+            # Speaker volumes, each out of ``total`` (0-10 on the O1200).
+            if isinstance(data, dict):
+                settings = state.settings
+                state = replace(
+                    state,
+                    settings=replace(
+                        settings,
+                        volume=_int_or(data.get("volume"), settings.volume),
+                        fall_volume=_int_or(
+                            data.get("fallVolume"), settings.fall_volume
+                        ),
+                        search_volume=_int_or(
+                            data.get("searchVolume"), settings.search_volume
+                        ),
+                        volume_total=_int_or(
+                            data.get("total"), settings.volume_total
+                        ),
+                    ),
+                )
+        case "getAutoCutDirection" | "onAutoCutDirection":
+            # Rotate the mowing direction automatically each week.
+            if isinstance(data, dict):
+                state = replace(
+                    state,
+                    settings=replace(
+                        state.settings,
+                        auto_cut_direction=_bool(data.get("enable")),
+                    ),
+                )
         case "getCutEfficiency" | "onCutEfficiency":
             if isinstance(data, dict):
                 level = _int(data.get("level"))
@@ -445,6 +560,22 @@ def _clean_activity(data: dict[str, Any], current: MowerActivity) -> MowerActivi
     return current
 
 
+def _clean_content_type(data: dict[str, Any]) -> str | None:
+    """Return the active job type from a cleanInfo payload.
+
+    ``cleanState.content.type`` is "auto" for a full mow and "borderrotate"
+    for edge trimming; the key is absent when no job is running.
+    """
+    clean_state = data.get("cleanState")
+    if not isinstance(clean_state, dict):
+        return None
+    content = clean_state.get("content")
+    if not isinstance(content, dict):
+        return None
+    value = content.get("type")
+    return str(value) if value else None
+
+
 def _task_id(data: dict[str, Any], current: str | None) -> str | None:
     """Return the best current mowing task id found in app payloads.
 
@@ -510,7 +641,7 @@ def _map_position_data(
 
     return replace(
         current,
-        mid=str(data.get("mid")) if data.get("mid") is not None else current.mid,
+        mid=_merge_stream_mid(current.mid, data.get("mid")),
         current_position=mower_position or current.current_position,
         charge_positions=charge_positions or current.charge_positions,
         uwb_positions=uwb_positions or current.uwb_positions,
@@ -518,6 +649,16 @@ def _map_position_data(
         last_update_ts=_int(data.get("_mqtt_ts")) or current.last_update_ts,
         revision=current.revision + 1,
     )
+
+
+def _merge_stream_mid(current_mid: str | None, incoming: Any) -> str | None:
+    """Merge a position-stream map id, ignoring the O-series "0" placeholder."""
+    if incoming is None:
+        return current_mid
+    incoming = str(incoming)
+    if incoming == "0" and current_mid:
+        return current_mid
+    return incoming
 
 def _map_uwb_data(current: MowerMap, data: dict[str, Any]) -> MowerMap:
     """Merge beacon position data from getUWB/onUWB payloads."""
@@ -531,7 +672,7 @@ def _map_uwb_data(current: MowerMap, data: dict[str, Any]) -> MowerMap:
 
     return replace(
         current,
-        mid=str(data.get("mid")) if data.get("mid") is not None else current.mid,
+        mid=_merge_stream_mid(current.mid, data.get("mid")),
         uwb_positions=uwb_positions or current.uwb_positions,
         last_update_ts=_int(data.get("_mqtt_ts")) or current.last_update_ts,
     )
@@ -652,8 +793,13 @@ def _reset_map_on_id_change(state: MowerState, data: Any) -> MowerState:
     if incoming is None:
         return state
     incoming = str(incoming)
+    # O-series position pushes report mid "0" while map replies (onMI) carry
+    # the real map id; "0" is a placeholder, not a map switch, and treating it
+    # as one wipes the live geometry on every push after a map reply.
+    if incoming == "0":
+        return state
     current_mid = state.map.mid
-    if not current_mid or incoming == current_mid:
+    if not current_mid or current_mid == "0" or incoming == current_mid:
         return state
     return replace(
         state,
@@ -732,6 +878,150 @@ def _decode_map_subset(value: Any) -> Any:
         return _decode_lzma_json_chunks({0: value})
     except (binascii.Error, ValueError, lzma.LZMAError, json.JSONDecodeError):
         return None
+
+
+def _map_track_push(current: MowerMap, data: dict[str, Any]) -> MowerMap:
+    """Accumulate an O-series live track push into the trace path.
+
+    Each ``onMapTrack`` push carries a small LZMA window of recently mowed
+    coordinates (records like ``["1", "2", "1;1;74;x,y;x,y;..."]`` where the
+    leading semicolon tokens are header fields). The union of all pushes is the
+    session's mowed path — the same layer the official app paints as "mowed".
+    """
+    decoded = _decode_map_subset(data.get("info"))
+    if not isinstance(decoded, list):
+        return current
+
+    new_points: list[MapPosition] = []
+    for record in decoded:
+        if not isinstance(record, list):
+            continue
+        coordinates = next(
+            (
+                field
+                for field in record
+                if isinstance(field, str) and ";" in field and "," in field
+            ),
+            None,
+        )
+        if coordinates is None:
+            continue
+        for token in coordinates.split(";"):
+            if "," not in token:
+                continue
+            x_text, y_text, *_rest = token.split(",")
+            try:
+                new_points.append(MapPosition(x=int(x_text), y=int(y_text)))
+            except ValueError:
+                continue
+    if not new_points:
+        return current
+
+    seen = {(position.x, position.y) for position in current.trace.path}
+    appended = list(current.trace.path)
+    for position in new_points:
+        key = (position.x, position.y)
+        if key in seen:
+            continue
+        seen.add(key)
+        appended.append(position)
+    if len(appended) > O_SERIES_TRACK_MAX_POINTS:
+        appended = appended[-O_SERIES_TRACK_MAX_POINTS:]
+
+    return replace(
+        current,
+        trace=replace(
+            current.trace,
+            batch_id=str(data["batid"]) if data.get("batid") is not None else current.trace.batch_id,
+            serial=str(data["serial"]) if data.get("serial") is not None else current.trace.serial,
+            info_size=_int(data.get("infoSize")),
+            path=tuple(appended),
+        ),
+    )
+
+
+def _map_zones(current: MowerMap, data: dict[str, Any]) -> MowerMap:
+    """Apply O-series zone boundaries (``onArI``) to the map.
+
+    The decoded blob is a list of records; zone entries are strings shaped
+    ``"<zone_id>;<anchor_x>,<anchor_y>;<chain code>"``.
+    """
+    decoded = _decode_map_subset(data.get("info"))
+    if not isinstance(decoded, list):
+        return current
+
+    zones: list[MowerZone] = []
+    for record in decoded:
+        if not isinstance(record, list):
+            continue
+        for field in record:
+            if not isinstance(field, str) or field.count(";") < 2:
+                continue
+            zone_id, anchor_text, chain = field.split(";", 2)
+            if not zone_id.isdigit() or "," not in anchor_text:
+                continue
+            x_text, y_text, *_rest = anchor_text.split(",")
+            try:
+                anchor = MapPosition(x=int(x_text), y=int(y_text))
+            except ValueError:
+                continue
+            zones.append(
+                MowerZone(
+                    zone_id=zone_id,
+                    anchor=anchor,
+                    boundary_code=chain,
+                    polygon=_zone_polygon(anchor, chain),
+                )
+            )
+    if not zones:
+        return current
+    return replace(current, zones=tuple(zones))
+
+
+def _zone_polygon(anchor: MapPosition, chain: str) -> tuple[MapPosition, ...]:
+    """Decode an 8-direction chain-coded zone boundary (best-effort).
+
+    ``(n)`` suffixes repeat the preceding direction n extra times. Step size
+    and direction mapping are provisional (``ZONE_CHAIN_STEP`` /
+    ``ZONE_CHAIN_DIRECTIONS``) until calibrated against the app map.
+    """
+    x, y = anchor.x, anchor.y
+    points = [MapPosition(x=x, y=y)]
+    for match in _ZONE_CHAIN_TOKEN.finditer(chain):
+        direction = ZONE_CHAIN_DIRECTIONS.get(int(match.group(1)))
+        if direction is None:
+            continue
+        repeats = 1 + (int(match.group(2)) if match.group(2) else 0)
+        for _ in range(repeats):
+            x += direction[0] * ZONE_CHAIN_STEP
+            y += direction[1] * ZONE_CHAIN_STEP
+            points.append(MapPosition(x=x, y=y))
+    if len(points) < 3:
+        return ()
+    return tuple(points)
+
+
+def _area_parameters(value: Any) -> tuple[AreaParameter, ...]:
+    """Parse ECOVACS ``areaParameters`` records into typed settings."""
+    if not isinstance(value, list):
+        return ()
+    parameters: list[AreaParameter] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        area_id = _int(item.get("areaID"))
+        if area_id is None:
+            continue
+        parameters.append(
+            AreaParameter(
+                area_id=area_id,
+                mow_height_level=_int(item.get("mowHeightLevel")),
+                cut_mode=_int(item.get("cutMode")),
+                obstacle_height=_int(item.get("obstacleHeight")),
+                angle=_int(item.get("angle")),
+            )
+        )
+    return tuple(parameters)
 
 
 def _area_anchor_points(records: list[Any]) -> tuple[MapPosition, ...]:
@@ -921,6 +1211,12 @@ def _progress(
     if mowed_area is None or job_area is None or job_area <= 0:
         return None
     return round(max(0, min(100, mowed_area / job_area * 100)), 1)
+
+
+def _int_or(value: Any, fallback: int | None) -> int | None:
+    """Return ``value`` as an int, keeping ``fallback`` when it is absent."""
+    parsed = _int(value)
+    return fallback if parsed is None else parsed
 
 
 def _float(value: Any) -> float | None:

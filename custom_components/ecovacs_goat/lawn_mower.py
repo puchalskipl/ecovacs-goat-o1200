@@ -59,6 +59,11 @@ class EcovacsMower(EcovacsMowerEntity, LawnMowerEntity):
         """Return mower activity."""
         return ACTIVITY_MAP[self.coordinator.data.activity]
 
+    @property
+    def extra_state_attributes(self) -> dict[str, str | None]:
+        """Expose the active job type (auto mow vs edge trimming)."""
+        return {"work_mode": self.coordinator.data.clean_type}
+
     async def async_start_mowing(self) -> None:
         """Start or resume mowing."""
         await self.coordinator.start_mowing()

@@ -3,14 +3,14 @@ refresh_state:
   description: Refresh mower state if MQTT/readback data is stale.
   target:
     entity:
-      integration: ecovacs_goat_g1
+      integration: ecovacs_goat
 
 request_live_position_stream:
   name: Request live position stream
   description: Request app-style fast live position updates while a live map is being viewed.
   target:
     entity:
-      integration: ecovacs_goat_g1
+      integration: ecovacs_goat
   fields:
     reason:
       name: Reason
@@ -38,7 +38,7 @@ start_debug_capture:
   description: Start an opt-in redacted ECOVACS debug capture session.
   target:
     entity:
-      integration: ecovacs_goat_g1
+      integration: ecovacs_goat
   fields:
     reason:
       name: Reason
@@ -74,21 +74,21 @@ stop_debug_capture:
   description: Stop an active ECOVACS debug capture session.
   target:
     entity:
-      integration: ecovacs_goat_g1
+      integration: ecovacs_goat
 
 clear_debug_capture:
   name: Clear debug captures
   description: Remove all local ECOVACS debug capture sessions and exported zips.
   target:
     entity:
-      integration: ecovacs_goat_g1
+      integration: ecovacs_goat
 
 mark_debug_capture:
   name: Mark debug capture
   description: Add a timestamped marker to the active ECOVACS debug capture.
   target:
     entity:
-      integration: ecovacs_goat_g1
+      integration: ecovacs_goat
   fields:
     message:
       name: Message
@@ -101,7 +101,7 @@ export_debug_capture:
   description: Zip the latest ECOVACS debug capture into /local/ecovacs_goat/debug/.
   target:
     entity:
-      integration: ecovacs_goat_g1
+      integration: ecovacs_goat
   fields:
     session_id:
       name: Session ID

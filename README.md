@@ -1,6 +1,10 @@
-# Ecovacs GOAT G1 for Home Assistant
+﻿# Ecovacs GOAT O1200 for Home Assistant
 
-A mower-only Home Assistant custom integration for ECOVACS GOAT G1 lawn mowers.
+A mower-only Home Assistant custom integration for ECOVACS GOAT lawn mowers,
+**tuned for the GOAT O1200 LiDAR Pro** (O-series): live map with the mowed
+track and zone boundaries, cutting height control, battery telemetry, and a
+dashboard card with mower controls. The integration domain is
+**`ecovacs_goat`**.
 
 It gives you a lawn mower entity, useful sensors, mower settings, and an optional dashboard card with map, start, stop, dock, and cut-direction controls.
 
@@ -12,28 +16,30 @@ This is an unofficial community project. It is not affiliated with, endorsed by,
 
 Use it at your own risk. A robotic mower has moving blades and can cause damage or injury if used unsafely. Always keep the mower in sight when testing new commands, and stop using the integration if either Home Assistant or the official ECOVACS app loses reliable control.
 
-## Tested Mower
+## Tested Mowers
 
-Developed and tested with an **ECOVACS GOAT G1-800**.
+Developed and tested with an **ECOVACS GOAT O1200 LiDAR Pro** (firmware
+2.13.10). GOAT G1-line mowers are also supported.
 
 No promise is made that it will work with any other mower model. ECOVACS vacuums are not supported.
 
-### Other models (experimental)
+### Mower families
 
-The integration now detects the **mower family** and adapts the protocol dialect it uses:
+The integration detects the **mower family** and adapts the protocol dialect it uses:
 
-- **GOAT G1 line** (G1, G1-800 / G-800, G1-2000, G1-1600) — fully implemented and validated. Uses the UWB beacon + `*_V2` map dialect.
-- **GOAT O-series** (O800 RTK, O1200, O1200 LiDAR Pro, ...) — **experimental, best-effort**. These models speak a different dialect: the `clean` command (not `clean_V2`), `getCleanInfo` (not `getCleanInfo_V2`), RTK reference points (`rtkPos`) instead of UWB, and the `getMapState` / `getMapTrack` / `getMI` / `getAreaSet` map commands. This was confirmed against a decrypted capture of a **GOAT O800 RTK** (firmware 1.9.10).
+- **GOAT G1 line** (G1, G1-800 / G-800, G1-2000, G1-1600) — supported. Uses the UWB beacon + `*_V2` map dialect.
+- **GOAT O-series** (O800 RTK, O1200, O1200 LiDAR Pro, ...) — supported, validated against a live-mowing O1200 LiDAR Pro capture. These models speak a different dialect: the `clean` command (not `clean_V2`), `getCleanInfo` (not `getCleanInfo_V2`), RTK reference points (`rtkPos`) instead of UWB, and the `getMapState` / `getMapTrack` / `getMI` / `getAreaSet` map commands.
 
 For O-series mowers the integration:
 
 - Detects the model and reports it on the **GOAT model line** diagnostic sensor (with `family`, `map_dialect`, and an `experimental` flag).
 - Drives the lawn mower entity, start/pause/resume/stop/dock controls, status, battery, error, and the **live position map** (mower marker + path) from the shared position stream.
+- Decodes the **mowed track** (`onMapTrack` compact-LZMA pushes) and paints it on the card, resetting it when a new mowing task starts.
+- Decodes **zone boundaries** (`onArI` chain-coded polygons) and draws them as dashed outlines (scale calibration is best-effort; the raw chain code is kept in the live-map attributes).
+- Exposes the **cutting height** (`AreaParameters.mowHeightLevel`, level x 10 mm on the O1200) as a number entity, plus battery temperature / current / voltage telemetry sensors from the `onFwBuryPoint-bd_*` stream.
+- Keeps the app-style live map session alive automatically while mowing (the `auto_live_map` option, on by default) so all of the above streams without the official app being open.
 - Shows the **RTK base station** on the map (from `getRTK`) where the G1 line shows UWB beacons.
-- **Does not** yet draw the completed-area outline, because the only available O-series capture was taken while docked (the map-trace command returns `fail` with no job running), so there is no validated geometry sample to decode. The map id is still learned so this can be finished later.
-- Avoids spamming `*_V2` map errors that the previous G1-only code produced on these mowers.
-
-If you own an O-series mower and want fuller support (especially the area outline), the most useful thing you can provide is a sanitized capture from the official app **taken during active mowing**. See **Debug Capture** below and the issue tracker.
+- Treats the map id `"0"` reported by O-series position pushes as a placeholder, not a map switch, so live geometry survives map replies.
 
 ## Why This Integration Exists
 
@@ -52,13 +58,13 @@ The goal is to keep communication with the mower conservative: use pushed update
 
 ## Installation With HACS
 
-Until this is available as a default HACS repository, add it manually:
+Add the repository as a custom repository:
 
 1. In Home Assistant, open **HACS**.
 2. Open the three-dot menu and choose **Custom repositories**.
-3. Add `https://github.com/Janverhu/ecovacs-goat-g1`.
+3. Add `https://github.com/puchalskipl/ecovacs-goat-o1200`.
 4. Select category **Integration**.
-5. Install **Ecovacs GOAT G1**.
+5. Install **Ecovacs GOAT O1200**.
 6. Restart Home Assistant.
 7. Add the integration from **Settings -> Devices & services -> Add integration**.
 
@@ -66,7 +72,7 @@ Until this is available as a default HACS repository, add it manually:
 
 Experimental builds — for example new model support being validated with a tester — are **automatically published as pre-releases** from the development branch (each push produces an incrementing beta such as `0.2.0b1`, `0.2.0b2`; only the latest beta is kept, and the line auto-advances after each stable release). See [CONTRIBUTING.md](CONTRIBUTING.md#releases--versioning) for the full release flow. To install one in HACS:
 
-1. Open **Ecovacs GOAT G1** in HACS.
+1. Open **Ecovacs GOAT O1200** in HACS.
 2. Three-dot menu -> **Redownload**.
 3. Enable **Show beta versions**.
 4. Pick the beta (e.g. `0.2.0b1`) and download, then **restart Home Assistant**.
@@ -79,7 +85,7 @@ You need your ECOVACS account username, password, and country. The integration u
 
 During setup, choose a Home Assistant device name. A generated default such as `Ecovacs-GOAT-1` is provided.
 
-ECOVACS now requires a one-time **email device verification** for Home Assistant. After you submit your account details, check the email inbox for that ECOVACS account, enter the code, and keep using the same Home Assistant instance. The integration stores a stable client device id and keeps the verified account session in a **private Home Assistant store** (not in the config entry). Later startups reuse and rotate that session with `checkLogin`, so they do not password-login again. If the integration later asks you to reauthenticate, confirm the password and enter a fresh email code. You can also start that login yourself from **Settings → Devices & services → Ecovacs GOAT G1 → Configure → Re-authenticate account**.
+ECOVACS now requires a one-time **email device verification** for Home Assistant. After you submit your account details, check the email inbox for that ECOVACS account, enter the code, and keep using the same Home Assistant instance. The integration stores a stable client device id and keeps the verified account session in a **private Home Assistant store** (not in the config entry). Later startups reuse and rotate that session with `checkLogin`, so they do not password-login again. If the integration later asks you to reauthenticate, confirm the password and enter a fresh email code. You can also start that login yourself from **Settings → Devices & services → Ecovacs GOAT O1200 → Configure → Re-authenticate account**.
 
 ## Optional Dashboard Card
 
@@ -104,8 +110,15 @@ area_entity: sensor.mower_mowing_area
 progress_entity: sensor.mower_mowing_progress
 direction_entity: number.mower_cut_direction
 stop_button: button.mower_end_mowing
+map_entity: sensor.mower_live_map
 name: Mower
 ```
+
+The card falls back to `sensor.mower_live_map` when `map_entity` is not set, so
+set it explicitly if your mower's entities use a different prefix — otherwise
+the map shows "Waiting for live map data" forever. `trail_gap_limit`
+(map units, default `500`) controls when the live trail is split instead of
+drawing a straight line between distant points; set `0` to disable splitting.
 
 ## How It Behaves
 
@@ -123,23 +136,23 @@ The map is built from two layers that update at different rates:
 
 2. **The “last line” / in-progress segment** — While **mowing**, the integration keeps a short polyline of recent **positions** (`position_history`): ideally one point per MQTT **`onPos`** message. If **`onPos` has been quiet for about 60 seconds**, a background task asks the cloud for **`getPos`** instead. When a new trace snapshot is applied, that live segment is **reset** so the stored outline and the line still being drawn stay aligned.
 
-**Keepalive (“someone is watching the map”)** — In the official app, opening the live map nudges the cloud and mower toward **faster `onPos`** and related map traffic. Home Assistant does not do that continuously. The service **`ecovacs_goat_g1.request_live_position_stream`** asks ECOVACS for an **app-style map session** (map set, trace, map point) and, when you pass **`duration_seconds`**, keeps a **keepalive window** open: a background loop sends **`appping`**, repeats the stream request, and keeps **app-presence MQTT** active so the mower treats the session like an open app map. The optional **Ecovacs GOAT** card starts this for you (default **10 minutes** per activation) and passes **`force: true`**, which bypasses the coordinator’s usual spacing on stream requests so the loop can stay aggressive while the window runs. **While MQTT `onPos` is flowing**, the moving dot and the live segment update from those pushes, and accumulated heading opens the **trace** gate after turns. If **`onPos` stops** (no keepalive and no mower pushes), updates fall back to the **~60 second** mowing poll for both position and trace, which keeps the map roughly current but not smoothly animated.
+**Keepalive (“someone is watching the map”)** — In the official app, opening the live map nudges the cloud and mower toward **faster `onPos`** and related map traffic. Home Assistant does not do that continuously. The service **`ecovacs_goat.request_live_position_stream`** asks ECOVACS for an **app-style map session** (map set, trace, map point) and, when you pass **`duration_seconds`**, keeps a **keepalive window** open: a background loop sends **`appping`**, repeats the stream request, and keeps **app-presence MQTT** active so the mower treats the session like an open app map. The optional **Ecovacs GOAT** card starts this for you (default **10 minutes** per activation) and passes **`force: true`**, which bypasses the coordinator’s usual spacing on stream requests so the loop can stay aggressive while the window runs. **While MQTT `onPos` is flowing**, the moving dot and the live segment update from those pushes, and accumulated heading opens the **trace** gate after turns. If **`onPos` stops** (no keepalive and no mower pushes), updates fall back to the **~60 second** mowing poll for both position and trace, which keeps the map roughly current but not smoothly animated.
 
-Constants such as the 90° gate, 60 second stale interval, and stream request spacing live in `mower_coordinator.py` if you need exact values.
+Constants such as the 90Â° gate, 60 second stale interval, and stream request spacing live in `mower_coordinator.py` if you need exact values.
 
 For technical protocol notes, see `docs/protocol-summary.md`.
 
 ## Debug Capture
 
-If a model or feature does not work, use the debug capture services before opening an issue. Captures are disabled by default and stored locally under `/config/ecovacs_goat_g1_debug/`.
+If a model or feature does not work, use the debug capture services before opening an issue. Captures are disabled by default and stored locally under `/config/ecovacs_goat_debug/`.
 
 Recommended workflow:
 
-1. Call `ecovacs_goat_g1.start_debug_capture` from **Developer Tools -> Services**.
+1. Call `ecovacs_goat.start_debug_capture` from **Developer Tools -> Services**.
 2. Reproduce the problem.
-3. Optionally call `ecovacs_goat_g1.mark_debug_capture` at useful moments.
-4. Call `ecovacs_goat_g1.stop_debug_capture`.
-5. Download Home Assistant diagnostics or call `ecovacs_goat_g1.export_debug_capture`.
+3. Optionally call `ecovacs_goat.mark_debug_capture` at useful moments.
+4. Call `ecovacs_goat.stop_debug_capture`.
+5. Download Home Assistant diagnostics or call `ecovacs_goat.export_debug_capture`.
 
 Do not share passwords, access tokens, device IDs, or private network details publicly.
 

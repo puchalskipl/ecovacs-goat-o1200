@@ -1,20 +1,20 @@
-"""Tests for GOAT G1 retail SKU classification."""
+﻿"""Tests for GOAT G1 retail SKU classification."""
 
 from pathlib import Path
 import sys
 import types
 
-PACKAGE_PATH = Path(__file__).parents[2] / "custom_components" / "ecovacs_goat_g1"
+PACKAGE_PATH = Path(__file__).parents[2] / "custom_components" / "ecovacs_goat"
 
 custom_components = types.ModuleType("custom_components")
 custom_components.__path__ = [str(PACKAGE_PATH.parent)]
 sys.modules.setdefault("custom_components", custom_components)
 
-ecovacs_goat_g1 = types.ModuleType("custom_components.ecovacs_goat_g1")
-ecovacs_goat_g1.__path__ = [str(PACKAGE_PATH)]
-sys.modules.setdefault("custom_components.ecovacs_goat_g1", ecovacs_goat_g1)
+ecovacs_goat = types.ModuleType("custom_components.ecovacs_goat")
+ecovacs_goat.__path__ = [str(PACKAGE_PATH)]
+sys.modules.setdefault("custom_components.ecovacs_goat", ecovacs_goat)
 
-from custom_components.ecovacs_goat_g1.goat_g1_models import (
+from custom_components.ecovacs_goat.goat_models import (
     FAMILY_G1,
     FAMILY_O_SERIES,
     FAMILY_UNKNOWN,
@@ -27,41 +27,41 @@ from custom_components.ecovacs_goat_g1.goat_g1_models import (
     VARIANT_O_SERIES,
     VARIANT_UNKNOWN,
     classify_goat_family,
-    classify_goat_g1_variant,
+    classify_goat_variant,
     variant_family,
     variant_label,
 )
 
 
 def test_classify_g1_2000() -> None:
-    assert classify_goat_g1_variant("ECOVACS GOAT G1-2000") == VARIANT_G1_2000
-    assert classify_goat_g1_variant("GOATG1-2000") == VARIANT_G1_2000
+    assert classify_goat_variant("ECOVACS GOAT G1-2000") == VARIANT_G1_2000
+    assert classify_goat_variant("GOATG1-2000") == VARIANT_G1_2000
 
 
 def test_classify_g1_800_aliases() -> None:
-    assert classify_goat_g1_variant("GOAT G1-800") == VARIANT_G1_800
-    assert classify_goat_g1_variant("GOAT G-800") == VARIANT_G1_800
+    assert classify_goat_variant("GOAT G1-800") == VARIANT_G1_800
+    assert classify_goat_variant("GOAT G-800") == VARIANT_G1_800
 
 
 def test_classify_base_g1() -> None:
-    assert classify_goat_g1_variant("ECOVACS GOAT G1") == VARIANT_G1
-    assert classify_goat_g1_variant("GOAT GX") == VARIANT_UNKNOWN
+    assert classify_goat_variant("ECOVACS GOAT G1") == VARIANT_G1
+    assert classify_goat_variant("GOAT GX") == VARIANT_UNKNOWN
 
 
 def test_classify_o1200_lidar_pro_wins_over_o1200() -> None:
     assert (
-        classify_goat_g1_variant("ECOVACS GOAT O1200 LiDAR Pro")
+        classify_goat_variant("ECOVACS GOAT O1200 LiDAR Pro")
         == VARIANT_O1200_LIDAR_PRO
     )
-    assert classify_goat_g1_variant("GOAT O1200") == VARIANT_O1200
+    assert classify_goat_variant("GOAT O1200") == VARIANT_O1200
 
 
 def test_classify_o800_rtk() -> None:
-    assert classify_goat_g1_variant("ECOVACS GOAT O800 RTK") == VARIANT_O800_RTK
+    assert classify_goat_variant("ECOVACS GOAT O800 RTK") == VARIANT_O800_RTK
 
 
 def test_classify_generic_o_series() -> None:
-    assert classify_goat_g1_variant("ECOVACS GOAT O2950") == VARIANT_O_SERIES
+    assert classify_goat_variant("ECOVACS GOAT O2950") == VARIANT_O_SERIES
 
 
 def test_variant_label() -> None:

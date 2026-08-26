@@ -1,4 +1,4 @@
-"""Tests for ECOVACS country-code/API-code mapping helpers."""
+﻿"""Tests for ECOVACS country-code/API-code mapping helpers."""
 
 from pathlib import Path
 import sys
@@ -6,17 +6,17 @@ import types
 
 import pytest
 
-PACKAGE_PATH = Path(__file__).parents[2] / "custom_components" / "ecovacs_goat_g1"
+PACKAGE_PATH = Path(__file__).parents[2] / "custom_components" / "ecovacs_goat"
 
 custom_components = types.ModuleType("custom_components")
 custom_components.__path__ = [str(PACKAGE_PATH.parent)]
 sys.modules.setdefault("custom_components", custom_components)
 
-ecovacs_goat_g1 = types.ModuleType("custom_components.ecovacs_goat_g1")
-ecovacs_goat_g1.__path__ = [str(PACKAGE_PATH)]
-sys.modules.setdefault("custom_components.ecovacs_goat_g1", ecovacs_goat_g1)
+ecovacs_goat = types.ModuleType("custom_components.ecovacs_goat")
+ecovacs_goat.__path__ = [str(PACKAGE_PATH)]
+sys.modules.setdefault("custom_components.ecovacs_goat", ecovacs_goat)
 
-from custom_components.ecovacs_goat_g1.mower_api import country_api_code
+from custom_components.ecovacs_goat.mower_api import country_api_code
 
 
 @pytest.mark.parametrize(

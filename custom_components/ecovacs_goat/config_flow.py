@@ -24,10 +24,12 @@ from homeassistant.helpers.typing import VolDictType
 from .const import (
     CONF_SESSION_STORE_ID,
     CONF_VERIFICATION_CODE,
+    DEFAULT_AUTO_LIVE_MAP,
     DEFAULT_DEBUG_CAPTURE_MAX_DURATION_MINUTES,
     DEFAULT_DEBUG_CAPTURE_MAX_SIZE_MB,
     DEFAULT_DEBUG_CAPTURE_RAW_PAYLOADS,
     DOMAIN,
+    OPTION_AUTO_LIVE_MAP,
     OPTION_DEBUG_CAPTURE_MAX_DURATION_MINUTES,
     OPTION_DEBUG_CAPTURE_MAX_SIZE_MB,
     OPTION_DEBUG_CAPTURE_RAW_PAYLOADS,
@@ -372,6 +374,10 @@ class EcovacsOptionsFlow(OptionsFlow):
 
         options = self.config_entry.options
         schema: VolDictType = {
+            vol.Required(
+                OPTION_AUTO_LIVE_MAP,
+                default=options.get(OPTION_AUTO_LIVE_MAP, DEFAULT_AUTO_LIVE_MAP),
+            ): selector.BooleanSelector(),
             vol.Required(
                 OPTION_DEBUG_CAPTURE_RAW_PAYLOADS,
                 default=options.get(

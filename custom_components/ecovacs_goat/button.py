@@ -22,6 +22,10 @@ BUTTONS: tuple[ButtonEntityDescription, ...] = (
         name="Stop mowing",
     ),
     ButtonEntityDescription(
+        key="start_edge_trim",
+        name="Start edge trimming",
+    ),
+    ButtonEntityDescription(
         key="start_debug_capture",
         name="Start debug capture",
         entity_category=EntityCategory.DIAGNOSTIC,
@@ -76,6 +80,8 @@ class MowerButton(EcovacsMowerEntity, ButtonEntity):
                 await self.coordinator.async_refresh_state()
             case "end_mowing":
                 await self.coordinator.end_mowing()
+            case "start_edge_trim":
+                await self.coordinator.start_edge_trim()
             case "start_debug_capture":
                 self.coordinator.debug_capture.start(reason="Started from Home Assistant UI")
                 self.coordinator.async_set_updated_data(self.coordinator.data)

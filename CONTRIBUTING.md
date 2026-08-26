@@ -1,4 +1,4 @@
-# Contributing
+﻿# Contributing
 
 This repository is intentionally scoped to ECOVACS GOAT mower support. Please keep changes conservative and based on observed official-app behavior where possible.
 
@@ -31,7 +31,7 @@ The base is set once when a new line begins and then advances automatically.
 
 1. The base is read from `manifest.json` (e.g. `0.3.0`).
 2. If that base **already shipped as a stable release**, it advances to the next
-   minor (e.g. `0.3.0` released ⇒ work continues at `0.4.0`), so a beta never
+   minor (e.g. `0.3.0` released â‡’ work continues at `0.4.0`), so a beta never
    shadows a released version.
 3. The beta number increments from existing tags: `0.4.0b1`, `0.4.0b2`, …
 4. When the line advances, the new version is written back into `manifest.json`
@@ -67,14 +67,14 @@ from there.
   workflows; `[skip ci]` is an additional safeguard. Both `develop` and `main`
   must allow the token to push (branch protection bypass) for the write-backs.
 - The dashboard card is cache-busted by a content hash of the card file (see
-  `custom_components/ecovacs_goat_g1/frontend.py`), so it refreshes whenever the
+  `custom_components/ecovacs_goat/frontend.py`), so it refreshes whenever the
   file changes — independent of the version number.
 
 ## Development Checks
 
 ```bash
-python -m pytest tests/ecovacs_goat_g1/
-python -m compileall custom_components/ecovacs_goat_g1 tests/ecovacs_goat_g1
+python -m pytest tests/ecovacs_goat/
+python -m compileall custom_components/ecovacs_goat tests/ecovacs_goat
 ```
 
 ## Pre-commit

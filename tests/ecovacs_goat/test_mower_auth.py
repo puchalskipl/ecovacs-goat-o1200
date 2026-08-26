@@ -1,4 +1,4 @@
-"""Tests for ECOVACS device-verification authentication."""
+﻿"""Tests for ECOVACS device-verification authentication."""
 
 from __future__ import annotations
 
@@ -9,17 +9,17 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-PACKAGE_PATH = Path(__file__).parents[2] / "custom_components" / "ecovacs_goat_g1"
+PACKAGE_PATH = Path(__file__).parents[2] / "custom_components" / "ecovacs_goat"
 
 custom_components = types.ModuleType("custom_components")
 custom_components.__path__ = [str(PACKAGE_PATH.parent)]
 sys.modules.setdefault("custom_components", custom_components)
 
-ecovacs_goat_g1 = types.ModuleType("custom_components.ecovacs_goat_g1")
-ecovacs_goat_g1.__path__ = [str(PACKAGE_PATH)]
-sys.modules.setdefault("custom_components.ecovacs_goat_g1", ecovacs_goat_g1)
+ecovacs_goat = types.ModuleType("custom_components.ecovacs_goat")
+ecovacs_goat.__path__ = [str(PACKAGE_PATH)]
+sys.modules.setdefault("custom_components.ecovacs_goat", ecovacs_goat)
 
-from custom_components.ecovacs_goat_g1.mower_api import (
+from custom_components.ecovacs_goat.mower_api import (
     META,
     PRIVATE_API_PATH_FORMAT,
     AccountSession,
@@ -30,7 +30,7 @@ from custom_components.ecovacs_goat_g1.mower_api import (
     InvalidVerificationCodeError,
     _load_public_key,
 )
-from custom_components.ecovacs_goat_g1.util import (
+from custom_components.ecovacs_goat.util import (
     account_fingerprint,
     generate_client_device_id,
     generate_session_store_id,

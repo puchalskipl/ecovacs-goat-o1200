@@ -270,7 +270,7 @@ def _controllers_for_call(
             controllers.append(controller)
 
     if entity_ids and not controllers:
-        raise HomeAssistantError("No matching ECOVACS GOAT G1 entities found")
+        raise HomeAssistantError("No matching ECOVACS GOAT entities found")
 
     return controllers
 
@@ -308,7 +308,7 @@ def _device_ids_for_entities(hass: HomeAssistant, entity_ids: set[str]) -> set[s
 
     if invalid_entity_ids:
         raise HomeAssistantError(
-            "Entities are not ECOVACS GOAT G1 entities: "
+            "Entities are not ECOVACS GOAT entities: "
             + ", ".join(sorted(invalid_entity_ids))
         )
 

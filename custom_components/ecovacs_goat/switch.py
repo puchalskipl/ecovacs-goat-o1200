@@ -65,6 +65,12 @@ SWITCHES: tuple[MowerSwitchDescription, ...] = (
         value_fn=lambda state: state.settings.cross_map_border_warning,
         entity_category=EntityCategory.CONFIG,
     ),
+    MowerSwitchDescription(
+        key="auto_cut_direction",
+        name="Weekly cut direction change",
+        value_fn=lambda state: state.settings.auto_cut_direction,
+        entity_category=EntityCategory.CONFIG,
+    ),
 )
 
 

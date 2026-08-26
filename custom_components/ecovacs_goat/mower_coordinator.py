@@ -17,7 +17,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .debug_capture import DebugCaptureStore
-from .goat_g1_models import classify_goat_g1_variant
+from .goat_models import classify_goat_variant
 from .mower_profiles import MapDialect, profile_for_model
 from .mower_compat import (
     ProtocolProfile,
@@ -28,6 +28,7 @@ from .mower_compat import (
 from .mower_api import EcovacsApiError, EcovacsMowerApi
 from .mower_messages import (
     MOWING_EFFICIENCY_LEVELS,
+    OBSTACLE_AVOIDANCE_BY_LEVEL,
     OBSTACLE_AVOIDANCE_LEVELS,
     apply_command_data,
     apply_mqtt_payload,
@@ -52,6 +53,21 @@ COMMAND_VERIFY_INTERVAL_SECONDS = 6
 COMMAND_VERIFY_TIMEOUT_SECONDS = 90
 RETURNING_REFRESH_SECONDS = 10
 MOWING_POSITION_REFRESH_SECONDS = 60
+# Rolling keepalive window for the auto live-map option: extended on every
+# mowing refresh tick (60 s), so the app-style session stays open the whole
+# job and expires within this window once mowing ends.
+AUTO_LIVE_MAP_KEEPALIVE_SECONDS = 180
+# cleanState.content.type of the edge-trimming job (captured from the app's
+# border-cut mode on an O1200 LiDAR Pro).
+EDGE_TRIM_CONTENT_TYPE = "borderrotate"
+# Volume scale reported by getVolume when the mower has not answered yet.
+VOLUME_DEFAULT_TOTAL = 10
+# Settings field -> setVolume payload key.
+VOLUME_PAYLOAD_KEYS = {
+    "volume": "volume",
+    "fall_volume": "fallVolume",
+    "search_volume": "searchVolume",
+}
 POSITION_MQTT_STALE_SECONDS = 60
 MAP_HISTORY_STORE_VERSION = 1
 MAP_HISTORY_STORE_DELAY_SECONDS = 5
@@ -74,6 +90,7 @@ MAP_HISTORY_STORE_DELAY_SECONDS = 5
 #   keepalive window; background mowing refreshes stay at a slow getPos cadence.
 ACTIONABLE_MQTT_READBACK_COMMANDS = {
     "onAnimProtect",
+    "onAutoCutDirection",
     "onBorderSwitch",
     "onBreakPointStatus",
     "onChargeState",
@@ -87,6 +104,7 @@ ACTIONABLE_MQTT_READBACK_COMMANDS = {
     "onMoveupWarning",
     "onObstacleHeight",
     "onProtectState",
+    "onVolume",
     "onRainDelay",
     "onRecognization",
     "onStats",
@@ -106,6 +124,9 @@ COMMANDS_WITH_TASK_ID = {
     "charge",
     "clean_V2",
     "setAnimProtect",
+    "setAreaParameter",
+    "setAutoCutDirection",
+    "setVolume",
     "setBorderSwitch",
     "setChildLock",
     "setCrossMapBorderWarning",
@@ -158,6 +179,11 @@ STARTUP_GET_INFO_GROUPS = (
         "getGeolocation",
         "getChildLock",
         "getBorderSwitch",
+        # O-series per-zone mowing parameters (cutting height level); mowers
+        # that do not speak it are degraded gracefully by the getInfo fallback.
+        "getAreaParameter",
+        "getAutoCutDirection",
+        "getVolume",
     ),
 )
 
@@ -176,6 +202,7 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
         api: EcovacsMowerApi,
         device: MowerDevice,
         debug_capture: DebugCaptureStore | None = None,
+        auto_live_map_fn: Callable[[], bool] | None = None,
     ) -> None:
         super().__init__(
             hass,
@@ -185,6 +212,9 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
         self.api = api
         self.device = device
         self._debug_capture = debug_capture
+        # Reads the config-entry option live, so toggling it takes effect
+        # without a reload (checked on every mowing refresh tick).
+        self._auto_live_map_fn = auto_live_map_fn
         self._capability = profile_for_model(device.model)
         self.data = self._base_state()
         self._protocol = ProtocolProfile(
@@ -213,7 +243,7 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
         self._live_map_request_counter = 0
         self._stop_unsub: Callable[[], None] | None = None
         self._stopped = False
-        store_key = f"ecovacs_goat_g1_map_history_{device.did}".replace("/", "_")
+        store_key = f"ecovacs_goat_map_history_{device.did}".replace("/", "_")
         self._map_history_store: Store[dict[str, Any]] = Store(
             hass, MAP_HISTORY_STORE_VERSION, store_key
         )
@@ -525,6 +555,30 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
             return False
         return previous is None or previous.map.trace.path != current.map.trace.path
 
+    def async_set_updated_data(self, data: MowerState) -> None:
+        """Publish new state, clearing the mowed track when a new job starts.
+
+        O-series mowers accumulate the ``onMapTrack`` track across pushes; the
+        track belongs to one mowing task, so a task-id change (a new job
+        started from the app or schedule) resets it. Mid-job recharge resumes
+        keep the same task id and therefore keep the track.
+        """
+        previous = self.data
+        if (
+            previous is not None
+            and previous.task_id is not None
+            and data.task_id is not None
+            and data.task_id != previous.task_id
+            and data.map.trace.path
+        ):
+            data = replace(
+                data,
+                map=replace(
+                    data.map, trace=replace(data.map.trace, path=())
+                ),
+            )
+        super().async_set_updated_data(data)
+
     def _compact_live_position_segment(self, state: MowerState) -> MowerState:
         """Keep the live position segment since the last trace commit."""
         current = state.map.current_position
@@ -651,12 +705,29 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
                 return
             self.async_set_updated_data(await self._async_refresh_state_groups())
 
+    def _maybe_auto_extend_live_map(self) -> None:
+        """Keep the app-style live map session alive while mowing.
+
+        Gated by the ``auto_live_map`` config-entry option. Extends a rolling
+        keepalive window; the keepalive task itself stops pinging once the
+        mower leaves the live-stream activities, and the window expires within
+        ``AUTO_LIVE_MAP_KEEPALIVE_SECONDS`` of the last extension.
+        """
+        if self._auto_live_map_fn is None or not self._auto_live_map_fn():
+            return
+        self._extend_live_position_keepalive(
+            "auto_live_map",
+            duration_seconds=AUTO_LIVE_MAP_KEEPALIVE_SECONDS,
+            force=False,
+        )
+
     def _ensure_mowing_position_refresh(self) -> None:
         """Start the conservative live-position fallback while mowing.
 
         MQTT onPos is the preferred position source. This task only fills gaps when
         onPos has gone stale; it is not intended to drive normal map animation.
         """
+        self._maybe_auto_extend_live_map()
         if (
             self._mowing_position_refresh_task
             and not self._mowing_position_refresh_task.done()
@@ -677,6 +748,7 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
             await asyncio.sleep(MOWING_POSITION_REFRESH_SECONDS)
             if not self.data or self.data.activity is not MowerActivity.MOWING:
                 return
+            self._maybe_auto_extend_live_map()
             if self._has_recent_position_mqtt():
                 continue
             try:
@@ -1231,7 +1303,7 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
         """Return an empty cache row with static per-device fields filled in."""
         return replace(
             MowerState(),
-            goat_g1_variant=classify_goat_g1_variant(self.device.model),
+            goat_variant=classify_goat_variant(self.device.model),
             mower_family=str(self._capability.family),
         )
 
@@ -1240,9 +1312,9 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
         """Return learned protocol details for diagnostics."""
         return {
             **self._protocol.as_dict(),
-            "goat_g1_variant": self.data.goat_g1_variant
+            "goat_variant": self.data.goat_variant
             if self.data
-            else classify_goat_g1_variant(self.device.model),
+            else classify_goat_variant(self.device.model),
             "capability_profile": self._capability.as_dict(),
             "device_name": self.device.model,
         }
@@ -1292,6 +1364,41 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
         self._ensure_mowing_position_refresh()
         self._schedule_outcome_poll(
             "start_mowing", lambda state: state.activity is MowerActivity.MOWING
+        )
+
+    async def start_edge_trim(self) -> None:
+        """Start an edge-trimming job (the app's border-cut mode).
+
+        Edge trimming is a standalone job type — ``clean`` with
+        ``content.type = "borderrotate"`` — not a phase of a normal mow, so it
+        can only start while the mower is idle or docked.
+        """
+        await self.async_refresh_if_stale()
+        previous_activity = self.data.activity
+        if previous_activity in {
+            MowerActivity.MOWING,
+            MowerActivity.PAUSED,
+            MowerActivity.RETURNING,
+        }:
+            raise HomeAssistantError(
+                "Edge trimming is a separate job; end the current job first."
+            )
+        await self.control(
+            self._capability.clean_command,
+            {"act": "start", "content": {"type": EDGE_TRIM_CONTENT_TYPE}},
+            refresh_if_stale=False,
+        )
+        self.async_set_updated_data(
+            replace(
+                self.data,
+                activity=MowerActivity.MOWING,
+                clean_type=EDGE_TRIM_CONTENT_TYPE,
+                map=replace(self.data.map, position_history=()),
+            )
+        )
+        self._ensure_mowing_position_refresh()
+        self._schedule_outcome_poll(
+            "start_edge_trim", lambda state: state.activity is MowerActivity.MOWING
         )
 
     async def pause(self) -> None:
@@ -1448,6 +1555,18 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
                 predicate = (
                     lambda state: state.settings.cross_map_border_warning is enabled
                 )
+            case "auto_cut_direction":
+                await self.control(
+                    "setAutoCutDirection",
+                    {"enable": 1 if enabled else 0},
+                    refresh_if_stale=False,
+                )
+                state = apply_command_data(
+                    self.data,
+                    "getAutoCutDirection",
+                    {"enable": 1 if enabled else 0},
+                )
+                predicate = lambda state: state.settings.auto_cut_direction is enabled
             case _:
                 raise ValueError(f"Unsupported switch key {key}")
         self.async_set_updated_data(state)
@@ -1495,6 +1614,108 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
             "set_cut_direction", lambda state: state.settings.cut_direction == angle
         )
 
+    async def set_area_mow_height(self, area_id: int, level: int) -> None:
+        """Set the cutting-height level of one ``AreaParameters`` record.
+
+        O-series mowers (O1200 LiDAR Pro) manage cutting height through
+        ``AreaParameters``; the captured readback (``onAreaParameter``) carries
+        the full record set, so the write sends every record back with only the
+        requested level changed. The mower broadcasts ``onAreaParameter`` on
+        success, which confirms the write.
+        """
+        await self.async_refresh_if_stale()
+        parameters = self.data.settings.area_parameters
+        if not any(parameter.area_id == area_id for parameter in parameters):
+            raise HomeAssistantError(
+                f"Mowing parameters for zone {area_id} are not known yet; "
+                "refresh state (or open the ECOVACS app once) so the mower "
+                "reports its AreaParameters first."
+            )
+        updated = tuple(
+            replace(parameter, mow_height_level=level)
+            if parameter.area_id == area_id
+            else parameter
+            for parameter in parameters
+        )
+        payload = {
+            "areaParameters": [parameter.as_payload() for parameter in updated]
+        }
+        await self.control("setAreaParameter", payload, refresh_if_stale=False)
+        self.async_set_updated_data(
+            apply_command_data(self.data, "onAreaParameter", payload)
+        )
+        self._schedule_outcome_poll(
+            "set_area_mow_height",
+            lambda state: any(
+                parameter.area_id == area_id
+                and parameter.mow_height_level == level
+                for parameter in state.settings.area_parameters
+            ),
+        )
+
+    async def set_volume(self, key: str, level: int) -> None:
+        """Set one speaker volume level (0..volume_total).
+
+        ``setVolume`` carries every volume at once, so the untouched ones are
+        sent back unchanged to avoid resetting them.
+        """
+        await self.async_refresh_if_stale()
+        settings = self.data.settings
+        total = settings.volume_total or VOLUME_DEFAULT_TOTAL
+        level = max(0, min(total, level))
+        payload = {
+            "total": total,
+            "volume": settings.volume if settings.volume is not None else total,
+            "fallVolume": settings.fall_volume
+            if settings.fall_volume is not None
+            else total,
+            "searchVolume": settings.search_volume
+            if settings.search_volume is not None
+            else total,
+        }
+        payload[VOLUME_PAYLOAD_KEYS[key]] = level
+        await self.control("setVolume", payload, refresh_if_stale=False)
+        self.async_set_updated_data(
+            apply_command_data(self.data, "getVolume", payload)
+        )
+        self._schedule_outcome_poll(
+            "set_volume",
+            lambda state: getattr(state.settings, key) == level,
+        )
+
+    async def set_area_obstacle_height(self, level: int) -> None:
+        """Set obstacle-avoidance sensitivity across all mowing zones.
+
+        O-series mowers keep this in ``AreaParameters`` rather than the
+        standalone ``setObstacleHeight`` command, so mirror the app and write
+        the full record set back with the new level.
+        """
+        await self.async_refresh_if_stale()
+        parameters = self.data.settings.area_parameters
+        if not parameters:
+            await self.control(
+                "setObstacleHeight", {"level": level}, refresh_if_stale=False
+            )
+            self.async_set_updated_data(
+                apply_command_data(self.data, "getObstacleHeight", {"level": level})
+            )
+        else:
+            updated = tuple(
+                replace(parameter, obstacle_height=level) for parameter in parameters
+            )
+            payload = {
+                "areaParameters": [parameter.as_payload() for parameter in updated]
+            }
+            await self.control("setAreaParameter", payload, refresh_if_stale=False)
+            self.async_set_updated_data(
+                apply_command_data(self.data, "onAreaParameter", payload)
+            )
+        self._schedule_outcome_poll(
+            "set_area_obstacle_height",
+            lambda state: state.settings.obstacle_avoidance
+            == OBSTACLE_AVOIDANCE_BY_LEVEL.get(level),
+        )
+
     async def set_mowing_efficiency(self, option: str) -> None:
         """Set mowing efficiency."""
         await self.async_refresh_if_stale()
@@ -1512,18 +1733,7 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
 
     async def set_obstacle_avoidance(self, option: str) -> None:
         """Set obstacle avoidance mode."""
-        await self.async_refresh_if_stale()
-        level = OBSTACLE_AVOIDANCE_LEVELS[option]
-        await self.control(
-            "setObstacleHeight", {"level": level}, refresh_if_stale=False
-        )
-        self.async_set_updated_data(
-            apply_command_data(self.data, "getObstacleHeight", {"level": level})
-        )
-        self._schedule_outcome_poll(
-            "set_obstacle_avoidance",
-            lambda state: state.settings.obstacle_avoidance == option,
-        )
+        await self.set_area_obstacle_height(OBSTACLE_AVOIDANCE_LEVELS[option])
 
     async def set_animal_time(self, key: str, value: str) -> None:
         """Set animal protection time window."""

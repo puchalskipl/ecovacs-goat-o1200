@@ -25,9 +25,11 @@ from .const import (
     CONF_ACCESS_TOKEN,
     CONF_ACCOUNT_UID,
     CONF_SESSION_STORE_ID,
+    DEFAULT_AUTO_LIVE_MAP,
     DEFAULT_DEBUG_CAPTURE_MAX_DURATION_MINUTES,
     DEFAULT_DEBUG_CAPTURE_MAX_SIZE_MB,
     DEFAULT_DEBUG_CAPTURE_RAW_PAYLOADS,
+    OPTION_AUTO_LIVE_MAP,
     OPTION_DEBUG_CAPTURE_MAX_DURATION_MINUTES,
     OPTION_DEBUG_CAPTURE_MAX_SIZE_MB,
     OPTION_DEBUG_CAPTURE_RAW_PAYLOADS,
@@ -57,7 +59,7 @@ class EcovacsController:
         self._config = config
         self._configured_name = str(config.get(CONF_NAME) or "Ecovacs-GOAT")
         self._debug_capture = DebugCaptureStore(
-            Path(hass.config.path("ecovacs_goat_g1_debug")),
+            Path(hass.config.path("ecovacs_goat_debug")),
             Path(hass.config.path("www", "ecovacs_goat", "debug")),
         )
         self._configure_debug_capture(entry.options)
@@ -126,6 +128,7 @@ class EcovacsController:
                     api,
                     device,
                     self._debug_capture,
+                    auto_live_map_fn=self._auto_live_map_enabled,
                 )
                 await coordinator.async_start()
                 started.append(coordinator)
@@ -210,6 +213,12 @@ class EcovacsController:
     def debug_capture(self) -> DebugCaptureStore:
         """Return debug capture store."""
         return self._debug_capture
+
+    def _auto_live_map_enabled(self) -> bool:
+        """Return the live value of the auto live-map option."""
+        return bool(
+            self._entry.options.get(OPTION_AUTO_LIVE_MAP, DEFAULT_AUTO_LIVE_MAP)
+        )
 
     def _configure_debug_capture(self, options: Mapping[str, Any]) -> None:
         """Apply capture defaults from config entry options."""

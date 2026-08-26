@@ -1,23 +1,23 @@
-{
+﻿{
   "config": {
     "abort": {
-      "already_configured": "[%key:common::config_flow::abort::already_configured_account%]",
-      "reauth_successful": "[%key:common::config_flow::abort::reauth_successful%]"
+      "already_configured": "Account is already configured",
+      "reauth_successful": "Re-authentication was successful"
     },
     "error": {
-      "cannot_connect": "[%key:common::config_flow::error::cannot_connect%]",
-      "invalid_auth": "[%key:common::config_flow::error::invalid_auth%]",
+      "cannot_connect": "Failed to connect",
+      "invalid_auth": "Invalid authentication",
       "invalid_verification_code": "The verification code is invalid or has expired.",
-      "unknown": "[%key:common::config_flow::error::unknown%]",
+      "unknown": "Unexpected error",
       "invalid_name": "Enter a name."
     },
     "step": {
       "user": {
         "data": {
-          "name": "[%key:common::config_flow::data::name%]",
-          "country": "[%key:common::config_flow::data::country%]",
-          "password": "[%key:common::config_flow::data::password%]",
-          "username": "[%key:common::config_flow::data::username%]"
+          "name": "Name",
+          "country": "Country",
+          "password": "Password",
+          "username": "Username"
         }
       },
       "device_verification": {
@@ -28,7 +28,7 @@
       },
       "reauth_confirm": {
         "data": {
-          "password": "[%key:common::config_flow::data::password%]"
+          "password": "Password"
         },
         "description": "Enter the ECOVACS password for {username} to reconnect the integration."
       }
@@ -40,16 +40,17 @@
     },
     "step": {
       "init": {
-        "title": "Ecovacs GOAT G1",
-        "description": "Change debug capture settings or start a new ECOVACS login.",
+        "title": "Ecovacs GOAT O1200",
+        "description": "Change integration options or start a new ECOVACS login.",
         "menu_options": {
-          "configure": "Debug capture",
+          "configure": "Integration options",
           "reauthenticate": "Re-authenticate account"
         }
       },
       "configure": {
         "description": "{warning}",
         "data": {
+          "auto_live_map": "Keep the live map streaming while mowing (positions and mowed track update without opening the app)",
           "debug_capture_raw_payloads": "Include raw payloads in debug captures",
           "debug_capture_max_duration_minutes": "Maximum capture duration",
           "debug_capture_max_size_mb": "Maximum capture size"

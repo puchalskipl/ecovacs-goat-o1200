@@ -8,9 +8,13 @@ from typing import Any
 
 POSITION_HISTORY_ATTRIBUTE_POINTS = 800
 POSITION_HISTORY_DENSE_TAIL_POINTS = 600
-TRACE_ATTRIBUTE_POINTS = 120
+# O-series mowers stream the full mowed track (onMapTrack); 120 sampled points
+# collapse whole lanes, so keep the trace attribute much denser than the G1
+# heading-gated trace needed.
+TRACE_ATTRIBUTE_POINTS = 1200
 OUTLINE_ATTRIBUTE_POINTS = 100
 OBSTACLE_ATTRIBUTE_POINTS = 24
+ZONE_ATTRIBUTE_POINTS = 160
 
 
 class MowerActivity(StrEnum):
@@ -60,6 +64,64 @@ class NetworkInfo:
     mac: str | None = None
 
 
+# Cutting height maps inversely to ``AreaParameters.mowHeightLevel``:
+# mm = 85 - 5 * level, i.e. levels 1..11 are 80..30 mm. Calibrated against the
+# app on an O1200 LiDAR Pro (level 1 -> 80 mm, 6 -> 55, 7 -> 50, 11 -> 30);
+# the app slider steps by 5 mm.
+CUT_HEIGHT_STEP_MM = 5
+CUT_HEIGHT_BASE_MM = 85
+CUT_HEIGHT_MIN_MM = 30
+CUT_HEIGHT_MAX_MM = 80
+
+
+def cut_height_mm_from_level(level: int) -> int:
+    """Convert a mowHeightLevel to millimetres."""
+    return CUT_HEIGHT_BASE_MM - CUT_HEIGHT_STEP_MM * level
+
+
+def cut_height_level_from_mm(millimetres: float) -> int:
+    """Convert millimetres to the nearest mowHeightLevel."""
+    return round((CUT_HEIGHT_BASE_MM - millimetres) / CUT_HEIGHT_STEP_MM)
+
+
+@dataclass(frozen=True)
+class AreaParameter:
+    """Per-zone mowing parameters (O-series ``AreaParameters`` records).
+
+    ``mow_height_level`` is the mower's cutting-height level; convert it with
+    :func:`cut_height_mm_from_level`.
+    """
+
+    area_id: int
+    mow_height_level: int | None = None
+    cut_mode: int | None = None
+    obstacle_height: int | None = None
+    angle: int | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return a serialisable representation."""
+        return {
+            "area_id": self.area_id,
+            "mow_height_level": self.mow_height_level,
+            "cut_mode": self.cut_mode,
+            "obstacle_height": self.obstacle_height,
+            "angle": self.angle,
+        }
+
+    def as_payload(self) -> dict[str, Any]:
+        """Return the ECOVACS ``AreaParameters`` record shape."""
+        payload: dict[str, Any] = {"areaID": self.area_id}
+        if self.mow_height_level is not None:
+            payload["mowHeightLevel"] = self.mow_height_level
+        if self.cut_mode is not None:
+            payload["cutMode"] = self.cut_mode
+        if self.obstacle_height is not None:
+            payload["obstacleHeight"] = self.obstacle_height
+        if self.angle is not None:
+            payload["angle"] = self.angle
+        return payload
+
+
 @dataclass(frozen=True)
 class MowerSettings:
     """Mower configuration values."""
@@ -76,8 +138,16 @@ class MowerSettings:
     move_up_warning: bool | None = None
     cross_map_border_warning: bool | None = None
     cut_direction: int | None = None
+    auto_cut_direction: bool | None = None
+    # Speaker volumes as reported by getVolume, each out of ``volume_total``:
+    # the main prompt volume, the lift/tilt alarm, and the "find mower" beep.
+    volume: int | None = None
+    fall_volume: int | None = None
+    search_volume: int | None = None
+    volume_total: int | None = None
     mowing_efficiency: str | None = None
     obstacle_avoidance: str | None = None
+    area_parameters: tuple[AreaParameter, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -222,6 +292,32 @@ class MowerMapInfo:
 
 
 @dataclass(frozen=True)
+class MowerZone:
+    """A named mowing zone boundary (O-series ``onArI`` records).
+
+    ``boundary_code`` keeps the raw 8-direction chain code so the polygon can
+    be re-derived once the direction mapping / step size are fully calibrated.
+    """
+
+    zone_id: str
+    anchor: MapPosition
+    boundary_code: str = ""
+    polygon: tuple[MapPosition, ...] = ()
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return a serialisable representation."""
+        return {
+            "zone_id": self.zone_id,
+            "anchor": self.anchor.as_dict(),
+            "boundary_code": self.boundary_code,
+            "polygon": [
+                position.as_dict()
+                for position in _sample_positions(self.polygon, ZONE_ATTRIBUTE_POINTS)
+            ],
+        }
+
+
+@dataclass(frozen=True)
 class MowerMap:
     """Live map data used by the Lovelace card."""
 
@@ -232,6 +328,7 @@ class MowerMap:
     rtk_station: MapPosition | None = None
     areas: tuple[MapPosition, ...] = ()
     no_go_zones: tuple[tuple[MapPosition, ...], ...] = ()
+    zones: tuple[MowerZone, ...] = ()
     position_history: tuple[MapPosition, ...] = ()
     info: MowerMapInfo = field(default_factory=MowerMapInfo)
     trace: MowerMapTrace = field(default_factory=MowerMapTrace)
@@ -252,6 +349,7 @@ class MowerMap:
             "no_go_zones": [
                 [position.as_dict() for position in zone] for zone in self.no_go_zones
             ],
+            "zones": [zone.as_dict() for zone in self.zones],
             "position_history": [
                 position.as_dict()
                 for position in _sample_positions(
@@ -294,11 +392,31 @@ def _sample_positions(
 
 
 @dataclass(frozen=True)
+class MowerTelemetry:
+    """Firmware telemetry pushed via ``onFwBuryPoint-bd_*`` topics.
+
+    Voltages arrive in millivolts, current in milliamps, temperature in C.
+    """
+
+    battery_temperature: int | None = None
+    battery_level: int | None = None
+    battery_current: int | None = None
+    battery_voltage: int | None = None
+    system_voltage: int | None = None
+    motor_voltage: int | None = None
+    motor_drive_voltage: int | None = None
+    core_plate_voltage: int | None = None
+
+
+@dataclass(frozen=True)
 class MowerState:
     """Complete cached mower state used by Home Assistant entities."""
 
     available: bool = True
     activity: MowerActivity = MowerActivity.UNKNOWN
+    # Active job type reported by cleanState.content.type: "auto" for a full
+    # mow, "borderrotate" for edge trimming; None when no job is running.
+    clean_type: str | None = None
     task_id: str | None = None
     battery: int | None = None
     charging: bool | None = None
@@ -308,9 +426,10 @@ class MowerState:
     network: NetworkInfo = field(default_factory=NetworkInfo)
     settings: MowerSettings = field(default_factory=MowerSettings)
     stats: MowerStats = field(default_factory=MowerStats)
+    telemetry: MowerTelemetry = field(default_factory=MowerTelemetry)
     map: MowerMap = field(default_factory=MowerMap)
     lifespans: dict[str, float] = field(default_factory=dict)
     robot_features: dict[str, Any] | None = None
-    goat_g1_variant: str = "unknown"
+    goat_variant: str = "unknown"
     mower_family: str = "unknown"
     raw: dict[str, Any] = field(default_factory=dict)

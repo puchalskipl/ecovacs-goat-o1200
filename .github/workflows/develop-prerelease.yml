@@ -1,4 +1,4 @@
-name: Develop pre-release
+﻿name: Develop pre-release
 
 # Every push to develop publishes an incrementing beta pre-release
 # (e.g. 0.2.0b1, 0.2.0b2, ...) so testers can install the latest development
@@ -39,7 +39,7 @@ jobs:
       - name: Compute next beta version
         id: ver
         run: |
-          manifest_base="$(python -c "import json, re; print(re.match(r'(\d+\.\d+\.\d+)', json.load(open('custom_components/ecovacs_goat_g1/manifest.json'))['version']).group(1))")"
+          manifest_base="$(python -c "import json, re; print(re.match(r'(\d+\.\d+\.\d+)', json.load(open('custom_components/ecovacs_goat/manifest.json'))['version']).group(1))")"
           git fetch --tags --force
           # Advance past any base that already shipped as a stable release so a
           # beta never shadows a released version (e.g. once 0.3.0 ships, the
@@ -64,11 +64,11 @@ jobs:
           MANIFEST_BASE: ${{ steps.ver.outputs.manifest_base }}
         run: |
           if [ "$BASE" != "$MANIFEST_BASE" ]; then
-            python -c "import json, os; p='custom_components/ecovacs_goat_g1/manifest.json'; d=json.load(open(p)); d['version']=os.environ['VERSION']; f=open(p,'w'); json.dump(d,f,indent=2); f.write('\n'); f.close()"
-            if ! git diff --quiet -- custom_components/ecovacs_goat_g1/manifest.json; then
+            python -c "import json, os; p='custom_components/ecovacs_goat/manifest.json'; d=json.load(open(p)); d['version']=os.environ['VERSION']; f=open(p,'w'); json.dump(d,f,indent=2); f.write('\n'); f.close()"
+            if ! git diff --quiet -- custom_components/ecovacs_goat/manifest.json; then
               git config user.name "github-actions[bot]"
               git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-              git add custom_components/ecovacs_goat_g1/manifest.json
+              git add custom_components/ecovacs_goat/manifest.json
               # [skip ci] avoids re-triggering this workflow on the push to develop.
               git commit -m "Start ${VERSION} development line [skip ci]"
               git push origin HEAD:develop

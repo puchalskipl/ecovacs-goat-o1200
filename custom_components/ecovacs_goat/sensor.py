@@ -17,6 +17,9 @@ from homeassistant.const import (
     PERCENTAGE,
     EntityCategory,
     UnitOfArea,
+    UnitOfElectricCurrent,
+    UnitOfElectricPotential,
+    UnitOfTemperature,
     UnitOfTime,
 )
 from homeassistant.core import HomeAssistant
@@ -25,7 +28,7 @@ from homeassistant.helpers.typing import StateType
 
 from . import EcovacsConfigEntry
 from .entity import EcovacsMowerEntity
-from .goat_g1_models import variant_label
+from .goat_models import variant_label
 from .mower_models import MowerState
 from .mower_profiles import profile_for_family
 
@@ -147,11 +150,62 @@ SENSORS: tuple[MowerSensorDescription, ...] = (
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
     MowerSensorDescription(
-        key="goat_g1_model_line",
+        key="battery_temperature",
+        name="Battery temperature",
+        value_fn=lambda state: state.telemetry.battery_temperature,
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        device_class=SensorDeviceClass.TEMPERATURE,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    MowerSensorDescription(
+        key="battery_current",
+        name="Battery current",
+        value_fn=lambda state: state.telemetry.battery_current,
+        native_unit_of_measurement=UnitOfElectricCurrent.MILLIAMPERE,
+        suggested_unit_of_measurement=UnitOfElectricCurrent.AMPERE,
+        device_class=SensorDeviceClass.CURRENT,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    MowerSensorDescription(
+        key="battery_voltage",
+        name="Battery voltage",
+        value_fn=lambda state: state.telemetry.battery_voltage,
+        native_unit_of_measurement=UnitOfElectricPotential.MILLIVOLT,
+        suggested_unit_of_measurement=UnitOfElectricPotential.VOLT,
+        device_class=SensorDeviceClass.VOLTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    MowerSensorDescription(
+        key="system_voltage",
+        name="System voltage",
+        value_fn=lambda state: state.telemetry.system_voltage,
+        native_unit_of_measurement=UnitOfElectricPotential.MILLIVOLT,
+        suggested_unit_of_measurement=UnitOfElectricPotential.VOLT,
+        device_class=SensorDeviceClass.VOLTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+    ),
+    MowerSensorDescription(
+        key="motor_voltage",
+        name="Motor voltage",
+        value_fn=lambda state: state.telemetry.motor_voltage,
+        native_unit_of_measurement=UnitOfElectricPotential.MILLIVOLT,
+        suggested_unit_of_measurement=UnitOfElectricPotential.VOLT,
+        device_class=SensorDeviceClass.VOLTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+    ),
+    MowerSensorDescription(
+        key="goat_model_line",
         name="GOAT model line",
-        value_fn=lambda state: variant_label(state.goat_g1_variant),
+        value_fn=lambda state: variant_label(state.goat_variant),
         attr_fn=lambda state: {
-            "variant_id": state.goat_g1_variant,
+            "variant_id": state.goat_variant,
             "family": state.mower_family,
             "map_dialect": str(profile_for_family(state.mower_family).map_dialect),
             "experimental": profile_for_family(state.mower_family).experimental,
