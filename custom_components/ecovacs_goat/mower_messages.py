@@ -432,12 +432,6 @@ def apply_command_data(state: MowerState, command: str, data: Any) -> MowerState
                         border_mode=_int(data.get("mode")),
                     ),
                 )
-        case "getChildLock" | "onChildLock":
-            if isinstance(data, dict):
-                state = replace(
-                    state,
-                    settings=replace(state.settings, safer_mode=_bool(data.get("on"))),
-                )
         case "getMoveupWarning" | "onMoveupWarning":
             if isinstance(data, dict):
                 state = replace(
@@ -465,6 +459,10 @@ def apply_command_data(state: MowerState, command: str, data: Any) -> MowerState
                         cut_direction=_int(data.get("angle")),
                     ),
                 )
+        case "getOta" | "onOta":
+            # Firmware/OTA state; ``ver`` is the installed firmware version.
+            if isinstance(data, dict) and data.get("ver"):
+                state = replace(state, firmware_version=str(data["ver"]))
         case "getVolume" | "onVolume":
             # Speaker volumes, each out of ``total`` (0-10 on the O1200).
             if isinstance(data, dict):
@@ -520,7 +518,7 @@ def apply_command_data(state: MowerState, command: str, data: Any) -> MowerState
             # ``isLocked``, ...) report whether a protection is *active right
             # now*, not whether its setting is enabled: animal protection with
             # a 21:00-08:00 window reports 0 at midday while the setting is on.
-            # The settings themselves come from getAnimProtect / getChildLock,
+            # The settings themselves come from getAnimProtect and friends,
             # so this reply must not overwrite them.
             if isinstance(data, dict):
                 state = replace(

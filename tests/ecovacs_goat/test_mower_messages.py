@@ -206,10 +206,6 @@ def test_captured_mqtt_setting_burst_updates_cache() -> None:
             "iot/atr/onRecognization/endpoint/77atlz/ONb7/j",
             b'{"body":{"data":{"state":1,"update":0,"items":[]}}}',
         ),
-        (
-            "iot/atr/onChildLock/endpoint/77atlz/ONb7/j",
-            b'{"body":{"data":{"on":1}}}',
-        ),
     ):
         state = apply_mqtt_payload(state, topic, payload)
 
@@ -223,7 +219,6 @@ def test_captured_mqtt_setting_burst_updates_cache() -> None:
     assert state.settings.border_mode == 0
     assert state.settings.obstacle_avoidance == "bumpy_tall_grass"
     assert state.settings.ai_recognition is True
-    assert state.settings.safer_mode is True
 
 
 def test_captured_lifecycle_and_battery_pushes_update_cache() -> None:
@@ -322,6 +317,10 @@ def test_stats_network_and_lifespan_parsing() -> None:
     assert state.lifespans["blade"] == 70.15
     assert state.lifespans["lensBrush"] == 100.0
     assert state.stats.total_count == 131
+    # Lifetime totals are reported in m2 (unlike onStats, which uses cm2)
+    # and must stay unconverted.
+    assert state.stats.total_area == 26067
+    assert state.stats.total_duration == 647760
 
 
 def test_get_robot_feature_populates_state() -> None:

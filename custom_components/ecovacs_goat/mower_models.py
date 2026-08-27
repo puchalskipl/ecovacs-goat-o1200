@@ -139,7 +139,6 @@ class MowerSettings:
     ai_recognition: bool | None = None
     border_switch: bool | None = None
     border_mode: int | None = None
-    safer_mode: bool | None = None
     move_up_warning: bool | None = None
     cross_map_border_warning: bool | None = None
     cut_direction: int | None = None
@@ -153,6 +152,52 @@ class MowerSettings:
     mowing_efficiency: str | None = None
     obstacle_avoidance: str | None = None
     area_parameters: tuple[AreaParameter, ...] = ()
+
+
+@dataclass(frozen=True)
+class MowerLastJob:
+    """Summary of the most recently finished job of one kind.
+
+    The mower's own ``getLastTimeStats`` covers only the single latest task
+    and carries no timestamp, so the integration tracks job lifecycles itself
+    and keeps one record per kind ("auto" mowing / "borderrotate" edge trim).
+    """
+
+    kind: str
+    started_at: str | None = None
+    ended_at: str | None = None
+    mowed_area: float | None = None
+    duration_minutes: float | None = None
+    task_id: str | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable payload for persistence."""
+        return {
+            "kind": self.kind,
+            "started_at": self.started_at,
+            "ended_at": self.ended_at,
+            "mowed_area": self.mowed_area,
+            "duration_minutes": self.duration_minutes,
+            "task_id": self.task_id,
+        }
+
+    @classmethod
+    def from_payload(cls, payload: Any) -> MowerLastJob | None:
+        """Rebuild a record from a persisted payload."""
+        if not isinstance(payload, dict) or not payload.get("kind"):
+            return None
+
+        def _num(value: Any) -> float | None:
+            return float(value) if isinstance(value, (int, float)) else None
+
+        return cls(
+            kind=str(payload["kind"]),
+            started_at=str(payload["started_at"]) if payload.get("started_at") else None,
+            ended_at=str(payload["ended_at"]) if payload.get("ended_at") else None,
+            mowed_area=_num(payload.get("mowed_area")),
+            duration_minutes=_num(payload.get("duration_minutes")),
+            task_id=str(payload["task_id"]) if payload.get("task_id") else None,
+        )
 
 
 @dataclass(frozen=True)
@@ -438,7 +483,14 @@ class MowerState:
     # Active job type reported by cleanState.content.type: "auto" for a full
     # mow, "borderrotate" for edge trimming; None when no job is running.
     clean_type: str | None = None
+    # Firmware version reported by getOta/onOta.
+    firmware_version: str | None = None
+    # Whether the cloud reports a pending firmware update (device updateInfo).
+    firmware_update_available: bool | None = None
     task_id: str | None = None
+    # Most recent finished job per kind ("auto" / "borderrotate"), tracked by
+    # the coordinator and persisted alongside the map history.
+    last_jobs: dict[str, MowerLastJob] = field(default_factory=dict)
     battery: int | None = None
     charging: bool | None = None
     charge_mode: str | None = None

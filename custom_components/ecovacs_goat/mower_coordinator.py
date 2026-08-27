@@ -15,10 +15,11 @@ from homeassistant.core import Event, HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from .debug_capture import DebugCaptureStore
 from .goat_models import classify_goat_variant
-from .map_outline import outline_from_coverage
+from .map_outline import outline_from_coverage, polygon_area
 from .mower_profiles import MapDialect, profile_for_model
 from .mower_compat import (
     ProtocolProfile,
@@ -43,7 +44,9 @@ from .mower_models import (
     MapPosition,
     MowerActivity,
     MowerDevice,
+    MowerLastJob,
     MowerMap,
+    MowerMapInfo,
     MowerMapTrace,
     MowerState,
     MowerZone,
@@ -73,6 +76,16 @@ AUTO_LIVE_MAP_KEEPALIVE_SECONDS = 180
 # cleanState.content.type of the edge-trimming job (captured from the app's
 # border-cut mode on an O1200 LiDAR Pro).
 EDGE_TRIM_CONTENT_TYPE = "borderrotate"
+# Job kinds tracked for the "last mowing" / "last edge trim" summaries.
+JOB_KIND_MOWING = "auto"
+JOB_KIND_EDGE_TRIM = EDGE_TRIM_CONTENT_TYPE
+# A job shorter than this with nothing mowed is an aborted start (e.g. a
+# rain/animal-protection bounce), not a job worth remembering.
+LAST_JOB_MIN_SECONDS = 60
+# The border-cut job also needs the border region to cut. Without it the
+# mower answers "get border content error" and aborts right after starting.
+# The app sends "reid:1;" (region id 1 = the lawn's outer border).
+EDGE_TRIM_CONTENT_VALUE = "reid:1;"
 # Recompute the coverage outline after the track grows by this many points.
 OUTLINE_RECOMPUTE_POINT_DELTA = 25
 # Volume scale reported by getVolume when the mower has not answered yet.
@@ -109,7 +122,6 @@ ACTIONABLE_MQTT_READBACK_COMMANDS = {
     "onBorderSwitch",
     "onBreakPointStatus",
     "onChargeState",
-    "onChildLock",
     "onCleanInfo",
     "onCleanInfo_V2",
     "onCrossMapBorderWarning",
@@ -143,7 +155,6 @@ COMMANDS_WITH_TASK_ID = {
     "setAutoCutDirection",
     "setVolume",
     "setBorderSwitch",
-    "setChildLock",
     "setCrossMapBorderWarning",
     "setCutDirection",
     "setCutEfficiency",
@@ -192,7 +203,6 @@ STARTUP_GET_INFO_GROUPS = (
         "getSafeProtect",
         "getRemoteSupport",
         "getGeolocation",
-        "getChildLock",
         "getBorderSwitch",
     ),
     # O-series reads kept in their own group: a mower that rejects one of them
@@ -267,6 +277,10 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
             hass, MAP_HISTORY_STORE_VERSION, store_key
         )
         self._saved_map_snapshot: tuple[Any, ...] | None = None
+        # In-flight job being tracked for the last-job summaries.
+        self._active_job: dict[str, Any] | None = None
+        # Last-job records restored from storage before the first refresh.
+        self._restored_last_jobs: dict[str, MowerLastJob] = {}
         # Learned setAreaParameter payload shape ("flat" or "wrapped").
         self._area_parameter_write_shape: str | None = None
         # Track length at the last coverage-outline computation.
@@ -302,6 +316,11 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
                     ),
                     zones=stored_map.zones,
                     charge_positions=stored_map.charge_positions,
+                    info=replace(
+                        self.data.map.info,
+                        outline=stored_map.info.outline
+                        or self.data.map.info.outline,
+                    ),
                 ),
             )
             self._saved_map_snapshot = (
@@ -311,6 +330,11 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
                 stored_map.mid,
                 stored_map.charge_positions,
                 stored_map.current_position,
+                stored_map.info.outline,
+            )
+        if self._restored_last_jobs:
+            self.data = replace(
+                self.data, last_jobs=dict(self._restored_last_jobs)
             )
         await self.async_config_entry_first_refresh()
         await self._mqtt.start()
@@ -409,6 +433,13 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
         if not isinstance(stored, dict):
             return None
 
+        self._restored_last_jobs = {
+            kind: job
+            for kind, payload in (stored.get("last_jobs") or {}).items()
+            for job in (MowerLastJob.from_payload(payload),)
+            if job is not None
+        }
+
         def positions(value: Any) -> tuple[MapPosition, ...]:
             if not isinstance(value, list):
                 return ()
@@ -443,6 +474,7 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
             trace=MowerMapTrace(path=positions(stored.get("trace_path"))),
             zones=zones,
             charge_positions=positions(stored.get("charge_positions")),
+            info=MowerMapInfo(outline=positions(stored.get("outline"))),
         )
 
     def _schedule_map_history_save(self, mower_map: MowerMap) -> None:
@@ -454,6 +486,7 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
             mower_map.mid,
             mower_map.charge_positions,
             mower_map.current_position,
+            mower_map.info.outline,
         )
         if snapshot == self._saved_map_snapshot:
             return
@@ -481,29 +514,47 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
             "current_position": mower_map.current_position.as_dict()
             if mower_map.current_position
             else None,
+            "outline": [
+                position.as_dict() for position in mower_map.info.outline
+            ],
+            "last_jobs": {
+                kind: job.as_dict()
+                for kind, job in (
+                    self.data.last_jobs if self.data else {}
+                ).items()
+            },
         }
 
     async def _async_update_data(self) -> MowerState:
         """Refresh from the mower using a small app-style command set."""
         try:
             state = await self._async_refresh_state_groups()
-            for command, payload in (
-                ("getWifiList", {}),
-                ("getLifeSpan", {}),
-                ("getTotalStats", {}),
-            ):
-                try:
-                    response = await self.api.control(self.device, command, payload)
-                    state = apply_response(state, command, response)
-                except EcovacsApiError as err:
-                    _LOGGER.debug(
-                        "ECOVACS coordinator update skipped %s: %s", command, err
-                    )
+            state = await self._async_refresh_extras(state)
         except EcovacsApiError as err:
             raise UpdateFailed(str(err)) from err
         except Exception as err:
             raise UpdateFailed(f"Unexpected ECOVACS update error: {err}") from err
 
+        # Poll refreshes bypass async_set_updated_data, so track jobs here too.
+        return self._track_job_lifecycle(self.data, state)
+
+    async def _async_refresh_extras(self, state: MowerState) -> MowerState:
+        """Refresh network info, consumable lifespans, and total stats."""
+        for command, payload in (
+            ("getWifiList", {}),
+            # The firmware tracks a single consumable: the blade. Explicit
+            # type selectors ("-1", type lists) return the same one record,
+            # so the app's cutting-line/brush counters must be cloud-side.
+            ("getLifeSpan", {}),
+            ("getTotalStats", {}),
+        ):
+            try:
+                response = await self.api.control(self.device, command, payload)
+                state = apply_response(state, command, response)
+            except EcovacsApiError as err:
+                _LOGGER.debug(
+                    "ECOVACS coordinator update skipped %s: %s", command, err
+                )
         return state
 
     def _handle_mqtt_message(self, topic: str, payload: bytes) -> None:
@@ -669,6 +720,7 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
         Home Assistant restarts.
         """
         previous = self.data
+        data = self._track_job_lifecycle(previous, data)
         if (
             previous is not None
             and previous.task_id is not None
@@ -685,6 +737,91 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
         data = self._maybe_update_outline(data)
         super().async_set_updated_data(data)
         self._schedule_map_history_save(data.map)
+
+    def _track_job_lifecycle(
+        self, previous: MowerState | None, data: MowerState
+    ) -> MowerState:
+        """Maintain the per-kind summaries of the most recent finished jobs.
+
+        The mower's own ``getLastTimeStats`` keeps only the single latest task,
+        without a timestamp, so the coordinator watches activity transitions
+        itself: a job starts when the mower begins working and is recorded when
+        it settles back on the dock. Legs of one task split by a mid-job
+        recharge share a task id and are merged into one record.
+        """
+        if previous is not None and previous.last_jobs and not data.last_jobs:
+            data = replace(data, last_jobs=dict(previous.last_jobs))
+
+        job = self._active_job
+        if data.activity in (
+            MowerActivity.MOWING,
+            MowerActivity.PAUSED,
+            MowerActivity.RETURNING,
+        ):
+            if job is None and data.activity is MowerActivity.MOWING:
+                job = self._active_job = {
+                    "kind": data.clean_type or JOB_KIND_MOWING,
+                    "started_at": dt_util.utcnow(),
+                    "task_id": data.task_id,
+                    "mowed_peak": 0.0,
+                }
+            if job is not None:
+                if data.clean_type:
+                    job["kind"] = data.clean_type
+                if data.task_id:
+                    job["task_id"] = data.task_id
+                if data.stats.area:
+                    job["mowed_peak"] = max(
+                        job["mowed_peak"], data.stats.area / 10000
+                    )
+            return data
+
+        if job is None:
+            return data
+        self._active_job = None
+        ended_at = dt_util.utcnow()
+        elapsed_seconds = (ended_at - job["started_at"]).total_seconds()
+        if elapsed_seconds < LAST_JOB_MIN_SECONDS and not job["mowed_peak"]:
+            # Aborted start (protection bounce / command error) — not a job.
+            return data
+
+        kind = (
+            JOB_KIND_EDGE_TRIM
+            if job["kind"] == JOB_KIND_EDGE_TRIM
+            else JOB_KIND_MOWING
+        )
+        record = MowerLastJob(
+            kind=kind,
+            started_at=job["started_at"].isoformat(),
+            ended_at=ended_at.isoformat(),
+            mowed_area=round(job["mowed_peak"], 1),
+            duration_minutes=round(elapsed_seconds / 60, 1),
+            task_id=job["task_id"],
+        )
+        existing = data.last_jobs.get(kind)
+        if (
+            existing is not None
+            and existing.task_id
+            and existing.task_id == record.task_id
+        ):
+            # A recharge split this task into legs — extend the earlier ones.
+            record = replace(
+                record,
+                started_at=existing.started_at or record.started_at,
+                duration_minutes=round(
+                    (existing.duration_minutes or 0.0)
+                    + (record.duration_minutes or 0.0),
+                    1,
+                ),
+                mowed_area=max(
+                    existing.mowed_area or 0.0, record.mowed_area or 0.0
+                ),
+            )
+        data = replace(data, last_jobs={**data.last_jobs, kind: record})
+        self._map_history_store.async_delay_save(
+            self._map_history_payload, MAP_HISTORY_STORE_DELAY_SECONDS
+        )
+        return data
 
     def _maybe_update_outline(self, data: MowerState) -> MowerState:
         """Refresh the coverage-derived lawn outline when the track grew.
@@ -706,6 +843,12 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
         outline = outline_from_coverage(coverage)
         self._outline_source_points = len(coverage)
         if not outline:
+            return data
+        current = data.map.info.outline
+        if current and polygon_area(outline) < polygon_area(current) * 0.9:
+            # The app keeps the lawn contour stable across jobs. A new job
+            # resets the track, so its partial coverage would trace a much
+            # smaller shape — keep the persisted full-lawn outline instead.
             return data
         return replace(
             data,
@@ -1292,8 +1435,10 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
         self.async_set_updated_data(await self._async_refresh_state_groups())
 
     async def async_refresh_state(self) -> None:
-        """Force a grouped state refresh from the mower."""
-        self.async_set_updated_data(await self._async_refresh_state_groups())
+        """Force a full refresh: state groups, consumables, and totals."""
+        state = await self._async_refresh_state_groups()
+        state = await self._async_refresh_extras(state)
+        self.async_set_updated_data(state)
 
     def _startup_getinfo_groups(self) -> tuple[tuple[str, ...], ...]:
         """Return startup getInfo groups adapted to this model's dialect.
@@ -1532,7 +1677,13 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
             )
         await self.control(
             self._capability.clean_command,
-            {"act": "start", "content": {"type": EDGE_TRIM_CONTENT_TYPE}},
+            {
+                "act": "start",
+                "content": {
+                    "type": EDGE_TRIM_CONTENT_TYPE,
+                    "value": EDGE_TRIM_CONTENT_VALUE,
+                },
+            },
             refresh_if_stale=False,
         )
         self.async_set_updated_data(
@@ -1668,16 +1819,6 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
                     {"enable": 1 if enabled else 0, "mode": settings.border_mode or 0},
                 )
                 predicate = lambda state: state.settings.border_switch is enabled
-            case "safer_mode":
-                await self.control(
-                    "setChildLock",
-                    {"on": 1 if enabled else 0},
-                    refresh_if_stale=False,
-                )
-                state = apply_command_data(
-                    self.data, "getChildLock", {"on": 1 if enabled else 0}
-                )
-                predicate = lambda state: state.settings.safer_mode is enabled
             case "move_up_warning":
                 await self.control(
                     "setMoveupWarning",

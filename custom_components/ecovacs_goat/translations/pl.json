@@ -125,17 +125,11 @@
       }
     },
     "sensor": {
-      "battery_current": {
-        "name": "Prąd baterii"
-      },
       "battery_level": {
         "name": "Poziom baterii"
       },
       "battery_temperature": {
         "name": "Temperatura baterii"
-      },
-      "battery_voltage": {
-        "name": "Napięcie baterii"
       },
       "debug_capture": {
         "name": "Zapis diagnostyczny"
@@ -143,20 +137,11 @@
       "error": {
         "name": "Błąd"
       },
-      "goat_model_line": {
-        "name": "Model kosiarki"
-      },
       "lifespan_blade": {
         "name": "Żywotność ostrzy"
       },
-      "lifespan_lens_brush": {
-        "name": "Żywotność szczotki lidaru"
-      },
       "live_map": {
         "name": "Mapa na żywo"
-      },
-      "motor_voltage": {
-        "name": "Napięcie silnika"
       },
       "network_ip": {
         "name": "Adres IP"
@@ -182,9 +167,6 @@
       "stats_time": {
         "name": "Czas koszenia"
       },
-      "system_voltage": {
-        "name": "Napięcie systemowe"
-      },
       "total_stats_area": {
         "name": "Łączna skoszona powierzchnia"
       },
@@ -193,6 +175,12 @@
       },
       "total_stats_time": {
         "name": "Łączny czas koszenia"
+      },
+      "last_mowing": {
+        "name": "Ostatnie koszenie"
+      },
+      "last_edge_trim": {
+        "name": "Ostatnie przycinanie"
       }
     },
     "switch": {
@@ -216,9 +204,6 @@
       },
       "rain_sensor": {
         "name": "Czujnik deszczu"
-      },
-      "safer_mode": {
-        "name": "Blokada rodzicielska"
       }
     },
     "time": {
@@ -227,6 +212,11 @@
       },
       "animal_protection_start": {
         "name": "Ochrona zwierząt od"
+      }
+    },
+    "update": {
+      "firmware": {
+        "name": "Oprogramowanie kosiarki"
       }
     }
   }

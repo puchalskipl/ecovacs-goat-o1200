@@ -37,6 +37,7 @@ PLATFORMS = [
     Platform.SENSOR,
     Platform.SWITCH,
     Platform.TIME,
+    Platform.UPDATE,
 ]
 
 type EcovacsConfigEntry = ConfigEntry[EcovacsController]

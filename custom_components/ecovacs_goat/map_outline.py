@@ -65,6 +65,22 @@ def outline_from_coverage(
     )
 
 
+def polygon_area(points: tuple[MapPosition, ...] | list[MapPosition]) -> float:
+    """Return the absolute area of a closed polygon (shoelace, map units²).
+
+    Used to decide whether a freshly traced outline covers more lawn than the
+    persisted one — a partial-mow outline must never shrink the stored map.
+    """
+    if len(points) < 3:
+        return 0.0
+    total = 0.0
+    count = len(points)
+    for index, point in enumerate(points):
+        nxt = points[(index + 1) % count]
+        total += point.x * nxt.y - nxt.x * point.y
+    return abs(total) / 2
+
+
 def _largest_region(cells: set[tuple[int, int]]) -> set[tuple[int, int]]:
     """Return the largest 8-connected component of covered cells."""
     remaining = set(cells)

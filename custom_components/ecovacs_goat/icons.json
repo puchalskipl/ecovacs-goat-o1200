@@ -59,6 +59,12 @@
       },
       "total_stats_cleanings": {
         "default": "mdi:counter"
+      },
+      "last_mowing": {
+        "default": "mdi:mower-on"
+      },
+      "last_edge_trim": {
+        "default": "mdi:scissors-cutting"
       }
     },
     "select": {
@@ -87,9 +93,6 @@
       },
       "rain_sensor": {
         "default": "mdi:weather-pouring"
-      },
-      "safer_mode": {
-        "default": "mdi:shield-half-full"
       }
     },
     "time": {

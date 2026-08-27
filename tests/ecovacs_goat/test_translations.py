@@ -6,9 +6,11 @@ import re
 
 PACKAGE_PATH = Path(__file__).parents[2] / "custom_components" / "ecovacs_goat"
 TRANSLATIONS = PACKAGE_PATH / "translations"
-PLATFORMS = ("button", "number", "select", "sensor", "switch", "time")
+PLATFORMS = ("button", "number", "select", "sensor", "switch", "time", "update")
 
-_TRANSLATION_KEY = re.compile(r'translation_key="([^"]+)"')
+# Matches both description kwargs (translation_key="x") and class attributes
+# (_attr_translation_key = "x").
+_TRANSLATION_KEY = re.compile(r'translation_key\s*=\s*"([^"]+)"')
 
 
 def _declared_keys() -> dict[str, set[str]]:

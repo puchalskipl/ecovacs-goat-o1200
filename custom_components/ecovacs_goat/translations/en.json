@@ -125,17 +125,11 @@
       }
     },
     "sensor": {
-      "battery_current": {
-        "name": "Battery current"
-      },
       "battery_level": {
         "name": "Battery level"
       },
       "battery_temperature": {
         "name": "Battery temperature"
-      },
-      "battery_voltage": {
-        "name": "Battery voltage"
       },
       "debug_capture": {
         "name": "Debug capture",
@@ -162,20 +156,11 @@
           }
         }
       },
-      "goat_model_line": {
-        "name": "GOAT model line"
-      },
       "lifespan_blade": {
         "name": "Blade lifespan"
       },
-      "lifespan_lens_brush": {
-        "name": "Lens brush lifespan"
-      },
       "live_map": {
         "name": "Live map"
-      },
-      "motor_voltage": {
-        "name": "Motor voltage"
       },
       "network_ip": {
         "name": "IP address"
@@ -201,9 +186,6 @@
       "stats_time": {
         "name": "Mowing duration"
       },
-      "system_voltage": {
-        "name": "System voltage"
-      },
       "total_stats_area": {
         "name": "Total area mowed"
       },
@@ -212,6 +194,12 @@
       },
       "total_stats_time": {
         "name": "Total mowing duration"
+      },
+      "last_mowing": {
+        "name": "Last mowing"
+      },
+      "last_edge_trim": {
+        "name": "Last edge trimming"
       }
     },
     "switch": {
@@ -235,9 +223,6 @@
       },
       "rain_sensor": {
         "name": "Rain sensor"
-      },
-      "safer_mode": {
-        "name": "Safer mode"
       }
     },
     "time": {
@@ -246,6 +231,11 @@
       },
       "animal_protection_start": {
         "name": "Animal protection start"
+      }
+    },
+    "update": {
+      "firmware": {
+        "name": "Firmware"
       }
     }
   }

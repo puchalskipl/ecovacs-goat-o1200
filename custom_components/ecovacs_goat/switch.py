@@ -48,12 +48,6 @@ SWITCHES: tuple[MowerSwitchDescription, ...] = (
         entity_category=EntityCategory.CONFIG,
     ),
     MowerSwitchDescription(
-        key="safer_mode",
-        translation_key="safer_mode",
-        value_fn=lambda state: state.settings.safer_mode,
-        entity_category=EntityCategory.CONFIG,
-    ),
-    MowerSwitchDescription(
         key="move_up_warning",
         translation_key="move_up_warning",
         value_fn=lambda state: state.settings.move_up_warning,

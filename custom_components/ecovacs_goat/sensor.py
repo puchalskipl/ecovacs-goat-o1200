@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from homeassistant.components.sensor import (
+    RestoreSensor,
     SensorDeviceClass,
     SensorEntity,
     SensorEntityDescription,
@@ -17,20 +18,17 @@ from homeassistant.const import (
     PERCENTAGE,
     EntityCategory,
     UnitOfArea,
-    UnitOfElectricCurrent,
-    UnitOfElectricPotential,
     UnitOfTemperature,
     UnitOfTime,
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.typing import StateType
+from homeassistant.util import dt as dt_util
 
 from . import EcovacsConfigEntry
 from .entity import EcovacsMowerEntity
-from .goat_models import variant_label
 from .mower_models import MowerState
-from .mower_profiles import profile_for_family
 
 
 @dataclass(kw_only=True, frozen=True)
@@ -39,11 +37,16 @@ class MowerSensorDescription(SensorEntityDescription):
 
     value_fn: Callable[[MowerState], StateType]
     attr_fn: Callable[[MowerState], dict[str, Any] | None] | None = None
+    # Restore the last value after a restart/reload. Used for telemetry that
+    # the mower only pushes while the battery is charging or discharging —
+    # without this, those sensors sit on "unknown" for hours after a restart.
+    restore: bool = False
 
 
 SENSORS: tuple[MowerSensorDescription, ...] = (
     MowerSensorDescription(
         key="battery_level",
+        suggested_display_precision=0,
         translation_key="battery_level",
         value_fn=lambda state: state.battery,
         native_unit_of_measurement=PERCENTAGE,
@@ -91,6 +94,7 @@ SENSORS: tuple[MowerSensorDescription, ...] = (
     ),
     MowerSensorDescription(
         key="stats_progress",
+        suggested_display_precision=0,
         translation_key="stats_progress",
         value_fn=lambda state: state.stats.progress,
         native_unit_of_measurement=PERCENTAGE,
@@ -121,7 +125,9 @@ SENSORS: tuple[MowerSensorDescription, ...] = (
     MowerSensorDescription(
         key="total_stats_area",
         translation_key="total_stats_area",
-        value_fn=lambda state: _area_square_meters(state.stats.total_area),
+        suggested_display_precision=0,
+        # getTotalStats reports area in m2 already, unlike onStats (cm2).
+        value_fn=lambda state: state.stats.total_area,
         native_unit_of_measurement=UnitOfArea.SQUARE_METERS,
         state_class=SensorStateClass.TOTAL_INCREASING,
         device_class=SensorDeviceClass.AREA,
@@ -142,16 +148,24 @@ SENSORS: tuple[MowerSensorDescription, ...] = (
         state_class=SensorStateClass.TOTAL_INCREASING,
     ),
     MowerSensorDescription(
-        key="lifespan_blade",
-        translation_key="lifespan_blade",
-        value_fn=lambda state: state.lifespans.get("blade"),
-        native_unit_of_measurement=PERCENTAGE,
-        entity_category=EntityCategory.DIAGNOSTIC,
+        key="last_mowing",
+        translation_key="last_mowing",
+        device_class=SensorDeviceClass.TIMESTAMP,
+        value_fn=lambda state: _last_job_ended(state, "auto"),
+        attr_fn=lambda state: _last_job_attributes(state, "auto"),
     ),
     MowerSensorDescription(
-        key="lifespan_lens_brush",
-        translation_key="lifespan_lens_brush",
-        value_fn=lambda state: state.lifespans.get("lensBrush"),
+        key="last_edge_trim",
+        translation_key="last_edge_trim",
+        device_class=SensorDeviceClass.TIMESTAMP,
+        value_fn=lambda state: _last_job_ended(state, "borderrotate"),
+        attr_fn=lambda state: _last_job_attributes(state, "borderrotate"),
+    ),
+    MowerSensorDescription(
+        key="lifespan_blade",
+        suggested_display_precision=0,
+        translation_key="lifespan_blade",
+        value_fn=lambda state: state.lifespans.get("blade"),
         native_unit_of_measurement=PERCENTAGE,
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
@@ -171,65 +185,11 @@ SENSORS: tuple[MowerSensorDescription, ...] = (
     MowerSensorDescription(
         key="battery_temperature",
         translation_key="battery_temperature",
+        restore=True,
         value_fn=lambda state: state.telemetry.battery_temperature,
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
         device_class=SensorDeviceClass.TEMPERATURE,
         state_class=SensorStateClass.MEASUREMENT,
-        entity_category=EntityCategory.DIAGNOSTIC,
-    ),
-    MowerSensorDescription(
-        key="battery_current",
-        translation_key="battery_current",
-        value_fn=lambda state: state.telemetry.battery_current,
-        native_unit_of_measurement=UnitOfElectricCurrent.MILLIAMPERE,
-        suggested_unit_of_measurement=UnitOfElectricCurrent.AMPERE,
-        device_class=SensorDeviceClass.CURRENT,
-        state_class=SensorStateClass.MEASUREMENT,
-        entity_category=EntityCategory.DIAGNOSTIC,
-    ),
-    MowerSensorDescription(
-        key="battery_voltage",
-        translation_key="battery_voltage",
-        value_fn=lambda state: state.telemetry.battery_voltage,
-        native_unit_of_measurement=UnitOfElectricPotential.MILLIVOLT,
-        suggested_unit_of_measurement=UnitOfElectricPotential.VOLT,
-        device_class=SensorDeviceClass.VOLTAGE,
-        state_class=SensorStateClass.MEASUREMENT,
-        entity_category=EntityCategory.DIAGNOSTIC,
-    ),
-    MowerSensorDescription(
-        key="system_voltage",
-        translation_key="system_voltage",
-        value_fn=lambda state: state.telemetry.system_voltage,
-        native_unit_of_measurement=UnitOfElectricPotential.MILLIVOLT,
-        suggested_unit_of_measurement=UnitOfElectricPotential.VOLT,
-        device_class=SensorDeviceClass.VOLTAGE,
-        state_class=SensorStateClass.MEASUREMENT,
-        entity_category=EntityCategory.DIAGNOSTIC,
-        entity_registry_enabled_default=False,
-    ),
-    MowerSensorDescription(
-        key="motor_voltage",
-        translation_key="motor_voltage",
-        value_fn=lambda state: state.telemetry.motor_voltage,
-        native_unit_of_measurement=UnitOfElectricPotential.MILLIVOLT,
-        suggested_unit_of_measurement=UnitOfElectricPotential.VOLT,
-        device_class=SensorDeviceClass.VOLTAGE,
-        state_class=SensorStateClass.MEASUREMENT,
-        entity_category=EntityCategory.DIAGNOSTIC,
-        entity_registry_enabled_default=False,
-    ),
-    MowerSensorDescription(
-        key="goat_model_line",
-        translation_key="goat_model_line",
-        value_fn=lambda state: variant_label(state.goat_variant),
-        attr_fn=lambda state: {
-            "variant_id": state.goat_variant,
-            "family": state.mower_family,
-            "map_dialect": str(profile_for_family(state.mower_family).map_dialect),
-            "experimental": profile_for_family(state.mower_family).experimental,
-            "robot_features": state.robot_features or {},
-        },
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
 )
@@ -263,6 +223,27 @@ def _area_square_meters(value: int | None) -> float | None:
     return None if value is None else value / 10000
 
 
+def _last_job_ended(state: MowerState, kind: str) -> Any:
+    """Return when the last job of the given kind finished."""
+    job = state.last_jobs.get(kind)
+    if job is None or not job.ended_at:
+        return None
+    return dt_util.parse_datetime(job.ended_at)
+
+
+def _last_job_attributes(state: MowerState, kind: str) -> dict[str, Any] | None:
+    """Expose the last job's details alongside its finish timestamp."""
+    job = state.last_jobs.get(kind)
+    if job is None:
+        return None
+    return {
+        "started_at": job.started_at,
+        "mowed_area_m2": job.mowed_area,
+        "duration_minutes": job.duration_minutes,
+        "task_id": job.task_id,
+    }
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     config_entry: EcovacsConfigEntry,
@@ -270,7 +251,9 @@ async def async_setup_entry(
 ) -> None:
     """Add mower sensors."""
     entities = [
-        MowerSensor(coordinator, description)
+        RestoringMowerSensor(coordinator, description)
+        if description.restore
+        else MowerSensor(coordinator, description)
         for coordinator in config_entry.runtime_data.coordinators
         for description in SENSORS
     ]
@@ -304,6 +287,29 @@ class MowerSensor(EcovacsMowerEntity, SensorEntity):
         if self.entity_description.attr_fn is None:
             return None
         return self.entity_description.attr_fn(self.coordinator.data)
+
+
+class RestoringMowerSensor(MowerSensor, RestoreSensor):
+    """Mower sensor that falls back to its last value after a restart.
+
+    Battery telemetry only streams while the battery charges or discharges,
+    so after a restart the last known value beats hours of "unknown".
+    """
+
+    _restored_value: StateType = None
+
+    async def async_added_to_hass(self) -> None:
+        """Restore the previous native value."""
+        await super().async_added_to_hass()
+        data = await self.async_get_last_sensor_data()
+        if data is not None:
+            self._restored_value = data.native_value
+
+    @property
+    def native_value(self) -> StateType:
+        """Return the live value, falling back to the restored one."""
+        value = self.entity_description.value_fn(self.coordinator.data)
+        return value if value is not None else self._restored_value
 
 
 class DebugCaptureSensor(EcovacsMowerEntity, SensorEntity):

@@ -41,6 +41,15 @@ const DEFAULT_CONFIG = {
   // Zone anchor markers (getAreaSet "ar" records). Anchors of other lawns
   // stretch the viewport the same way, so keep them off by default too.
   show_areas: false,
+  // Cap the rendered map height (CSS px). The SVG scales with the card
+  // width, so in a wide dashboard column an uncapped map fills the screen
+  // and pushes the action buttons below the fold.
+  map_max_height: 380,
+  // Compact-mode switches: the dashboard can surface state, metrics and
+  // controls through its own cards and reduce this card to just the map.
+  show_header: true,
+  show_summary: true,
+  show_buttons: true,
 };
 
 const CARD_FORMAT_VERSION = "rounded-summary-v2";
@@ -293,7 +302,9 @@ const STYLE = `
   .map svg {
     display: block;
     width: 100%;
-    min-height: 300px;
+    height: auto;
+    min-height: 220px;
+    max-height: var(--goat-map-max-height, 380px);
     background: #dfe5ec;
   }
   .map-empty {
@@ -576,9 +587,11 @@ class EcovacsGoatCard extends HTMLElement {
     // Edge trimming is a standalone job: only startable while idle/docked.
     const trimDisabled = unavailable || mowing || paused || returning;
 
-    this.innerHTML = `
-      <ha-card>
-        <style>${STYLE}</style>
+    const mapMaxHeight = Number(this.config.map_max_height) > 0
+      ? Number(this.config.map_max_height)
+      : 380;
+    const headerHtml = this.config.show_header
+      ? `
         <div class="header">
           <div class="title">
             <ha-icon icon="mdi:robot-mower-outline"></ha-icon>
@@ -588,18 +601,18 @@ class EcovacsGoatCard extends HTMLElement {
             <ha-icon icon="${meta.icon}"></ha-icon>
             ${this._escape(this._t(meta.label))}
           </div>
-        </div>
-
+        </div>`
+      : "";
+    const summaryHtml = this.config.show_summary
+      ? `
         <div class="summary">
           ${this._metric(this._t("mowing_area"), this._formatAreaState(area))}
           ${this._metric(this._t("progress"), this._formatRoundedState(progress))}
           ${this._metric(this._t("battery"), this._formatState(battery))}
-        </div>
-
-        ${this._errorLine(error)}
-
-        <div class="map-slot">${this._mapPanel(map, state)}</div>
-
+        </div>`
+      : "";
+    const actionsHtml = this.config.show_buttons
+      ? `
         <div class="actions">
           <button class="${this._buttonClass(primaryClass, primaryAction)}" data-action="${primaryAction}" ${primaryDisabled ? "disabled" : ""}>
             <ha-icon icon="${primaryIcon}"></ha-icon>
@@ -617,8 +630,18 @@ class EcovacsGoatCard extends HTMLElement {
             <ha-icon icon="mdi:scissors-cutting"></ha-icon>
             <span>${this._t("trim")}</span>
           </button>
-        </div>
+        </div>`
+      : "";
 
+    this.innerHTML = `
+      <ha-card style="--goat-map-max-height: ${mapMaxHeight}px;">
+        <style>${STYLE}</style>
+        ${headerHtml}
+        ${summaryHtml}
+        ${this._errorLine(error)}
+
+        <div class="map-slot">${this._mapPanel(map, state)}</div>
+        ${actionsHtml}
         ${this._directionControl(direction)}
       </ha-card>
     `;

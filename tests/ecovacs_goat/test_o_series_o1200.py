@@ -38,6 +38,7 @@ from custom_components.ecovacs_goat.mower_models import (
     AreaParameter,
     MapPosition,
     MowerActivity,
+    MowerLastJob,
     MowerState,
     cut_height_level_from_mm,
     cut_height_mm_from_level,
@@ -392,13 +393,9 @@ def test_protect_state_does_not_overwrite_settings() -> None:
     assert state.protections.emergency_stop is False
 
 
-def test_protect_state_keeps_child_lock_setting() -> None:
-    """``isLocked`` is a runtime flag; the safer-mode setting owns its value."""
-    state = _mqtt(MowerState(), "onChildLock", {"on": 1})
-    assert state.settings.safer_mode is True
-
-    state = _mqtt(state, "onProtectState", {"isLocked": 0})
-    assert state.settings.safer_mode is True
+def test_protect_state_reports_runtime_lock_flag() -> None:
+    """``isLocked`` is a runtime flag surfaced via the protections summary."""
+    state = _mqtt(MowerState(), "onProtectState", {"isLocked": 0})
     assert state.protections.locked is False
 
 
@@ -524,3 +521,37 @@ def test_position_placeholder_mid_does_not_wipe_geometry() -> None:
     )
     assert state.map.mid == "2"
     assert state.map.trace.path == ()
+
+
+def test_last_job_record_roundtrip() -> None:
+    """Last-job records survive the persistence round-trip unchanged."""
+    record = MowerLastJob(
+        kind="borderrotate",
+        started_at="2026-08-27T08:26:50+00:00",
+        ended_at="2026-08-27T08:39:48+00:00",
+        mowed_area=11.1,
+        duration_minutes=12.9,
+        task_id="1072906304",
+    )
+    assert MowerLastJob.from_payload(record.as_dict()) == record
+
+
+def test_last_job_record_rejects_invalid_payloads() -> None:
+    """Broken persisted payloads are dropped instead of crashing the load."""
+    assert MowerLastJob.from_payload(None) is None
+    assert MowerLastJob.from_payload({}) is None
+    assert MowerLastJob.from_payload({"kind": ""}) is None
+    partial = MowerLastJob.from_payload({"kind": "auto", "mowed_area": "bad"})
+    assert partial is not None
+    assert partial.mowed_area is None
+    assert partial.ended_at is None
+
+
+def test_last_jobs_survive_state_updates() -> None:
+    """State updates built via replace() keep the tracked last_jobs mapping."""
+    record = MowerLastJob(kind="auto", ended_at="2026-08-27T08:00:00+00:00")
+    state = replace(MowerState(), last_jobs={"auto": record})
+    state = apply_command_data(
+        state, "getTotalStats", {"area": 4963, "time": 177060, "count": 45}
+    )
+    assert state.last_jobs == {"auto": record}

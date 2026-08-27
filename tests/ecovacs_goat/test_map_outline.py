@@ -17,6 +17,7 @@ sys.modules.setdefault("custom_components.ecovacs_goat", ecovacs_goat)
 from custom_components.ecovacs_goat.map_outline import (
     OUTLINE_MIN_POINTS,
     outline_from_coverage,
+    polygon_area,
 )
 from custom_components.ecovacs_goat.mower_models import MapPosition
 
@@ -63,3 +64,19 @@ def test_outline_ignores_stray_satellite_points() -> None:
     outline = outline_from_coverage(coverage)
     assert outline
     assert all(p.x < 2000 and p.y < 2000 for p in outline)
+
+
+def test_polygon_area_shoelace() -> None:
+    """polygon_area returns the enclosed area for outline comparisons."""
+    square = (
+        MapPosition(x=0, y=0),
+        MapPosition(x=100, y=0),
+        MapPosition(x=100, y=100),
+        MapPosition(x=0, y=100),
+    )
+    assert polygon_area(square) == 10000
+    assert polygon_area(square[:2]) == 0.0
+    # A partial-mow outline is much smaller than the full lawn — the
+    # coordinator keeps the bigger one.
+    small = tuple(MapPosition(x=p.x // 4, y=p.y // 4) for p in square)
+    assert polygon_area(small) < polygon_area(square) * 0.9
