@@ -139,10 +139,12 @@ The mower stores its map as vector geometry, so the card draws the same
 picture the official app does, from four layers:
 
 1. **Lawn outline** — the mower's own stored map (`onMI`), an anchor point
-   plus an 8-direction chain code. The card fills it green. The mower only
-   sends it while docked and answers with an empty placeholder during a job,
-   so the integration persists it: it survives restarts and new jobs, and an
-   empty reply never clears it.
+   plus an 8-direction chain code. The card fills it green. The mower sends
+   it reliably during a job and only occasionally while docked (often just an
+   empty placeholder), so the integration persists the last real outline: it
+   survives restarts and new jobs, and an empty reply never clears it. Stored
+   geometry is versioned — after a decoder change it is dropped and refetched
+   rather than drawn wrong.
 2. **Obstacles** — chain-coded shapes the mower has learned (`onArI`,
    layer 3), punched out of the lawn as holes with `fill-rule="evenodd"`.
 3. **Mowed track** — the current job's cut path, accumulated from

@@ -191,7 +191,7 @@ async def refresh_rtk_map(
     Reads map build state, the fixed RTK base station, and the virtual-wall
     (``getMapTrack``) / area (``getAreaSet``) map-set layers, whose ``subsets``
     blobs decode with the shared LZMA decoder. Each call degrades gracefully on
-    failure. The geometry itself (base map, zone boundaries, mowed track) is
+    failure. The geometry itself (lawn outline, obstacles, mowed track) is
     pushed over MQTT rather than returned here.
 
     ``getMI`` runs first because the position stream only reports the
