@@ -116,7 +116,7 @@ SENSORS: tuple[MowerSensorDescription, ...] = (
             or state.map.trace.chunks
             or state.map.trace.path
             or state.map.position_history
-            or state.map.zones
+            or state.map.info.obstacles
         )
         else None,
         attr_fn=lambda state: state.map.as_dict(),

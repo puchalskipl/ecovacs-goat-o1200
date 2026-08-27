@@ -314,8 +314,9 @@ def test_stats_network_and_lifespan_parsing() -> None:
 
     assert state.network.ip == "192.0.2.10"
     assert state.network.rssi == 64
-    assert state.lifespans["blade"] == 70.15
-    assert state.lifespans["lensBrush"] == 100.0
+    # Percentages are stored as whole percent (see _progress/lifespan parsing).
+    assert state.lifespans["blade"] == 70
+    assert state.lifespans["lensBrush"] == 100
     assert state.stats.total_count == 131
     # Lifetime totals are reported in m2 (unlike onStats, which uses cm2)
     # and must stay unconverted.

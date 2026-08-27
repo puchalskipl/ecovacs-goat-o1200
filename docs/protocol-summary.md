@@ -36,12 +36,49 @@ Dock (`charge {act:"go"}`), `appping`, `getLifeSpan`, battery, and error are
 shared. The capability profile picks the command names / map dialect; the runtime
 profile in `mower_compat.py` still adapts on failures.
 
-The O-series area-outline / trace blobs (`getMapTrack`, `getMI`, `getAreaSet`)
-are **not decoded**: the only available O-series capture was taken while docked,
-where `getMapTrack` returns `fail`, so there is no validated geometry sample. The
-O-series live map is driven by the shared position stream (`deebotPos` + `rtkPos`)
-instead; the map id (`mid`) is still learned so a future active-mowing capture can
-complete the outline decode.
+### O-series map geometry (decoded)
+
+The mower's map is **vector geometry, not a bitmap**. Closed shapes are sent as
+an anchor plus an 8-direction chain code, wrapped in the shared base64 +
+compact-LZMA blob:
+
+| Push | Payload | Meaning |
+| --- | --- | --- |
+| `onMI` (`type: "-1"`) | `[["1", "s1;<seq>;<x>,<y>;<chain>"], ["2", ...]]` | **Lawn outline** — the shape the app fills green. Sent while docked; during a job the mower answers with an empty `s1;0;` placeholder, so consumers must persist the last real outline. |
+| `onArI` | `["1", "<layer>", "<count>", "<id>;<x>,<y>;<chain>", ...]` | Layer **3** holds the **obstacle shapes** the app paints as holes in the lawn. |
+| `onMapTrack` | records whose third field is `...;x,y;x,y;...` | Window of recently **mowed coordinates** (the current job's cut path). |
+| `onPos` / `getRTK` | `deebotPos` / `rtks[0]` | Mower marker and RTK base station. |
+
+Chain-code decoding (calibrated against a live capture, fw 2.13.10): `(n)`
+repeats the previous digit n extra times, and the digits walk a square grid
+where **even digits are the cardinal directions and odd digits the diagonals**
+(`2` = +Y, `4` = +X, `6` = -Y, `8` = -X, `1` = -X+Y, `3` = +X+Y, `5` = +X-Y,
+`7` = -X-Y). The Y axis matches the position frame — no mirroring.
+
+**The grid scale is carried by the payload, not assumed:** `centerX`/`centerY`
+in the `onMI` message are the centre of the outline's bounding box in map
+units, so map units per cell = `(centerX - anchor_x) / cell_bbox_centre_x`,
+cross-checked against the Y axis. On this mower both axes yield exactly
+**50**, which is also the fallback for payloads that omit the centre. Deriving
+it (rather than hard-coding) is what keeps the decode correct for other
+gardens and firmware revisions.
+
+With that, outline, obstacles, track, mower and dock all share one coordinate
+frame — the dock is the origin `(0, 0)`.
+
+Chain codes emit one point per step, so long straight edges arrive as hundreds
+of collinear points; collapsing them (`map_geometry.drop_collinear`) reduces a
+real outline from ~2200 points to ~220 without changing the shape.
+
+`getSpecialContour` and `getMapInfo` look like contour requests but this
+firmware never answers them (each call times out after ~20 s), so they are
+not worth sending. `getMI` is acknowledged immediately but only triggers the
+`onMI` push some of the time while docked; during a job the push arrives
+repeatedly, which is when the outline is reliably captured.
+
+There is **no bitmap/piece mechanism** for mowers (unlike Deebot vacuums'
+`getMajorMap`/`getMinorMap`): the app renders the picture client-side from this
+geometry, which is why it can show the full lawn while the mower sits docked.
 
 - Device commands use the N-GIoT endpoint `/api/iot/endpoint/control` with `apn=<command>` and `fmt=j`.
 - Command bodies use the app-style envelope with header version `0.0.22`.

@@ -1,12 +1,12 @@
 # Ecovacs GOAT O1200 for Home Assistant
 
 A mower-only Home Assistant custom integration for ECOVACS GOAT lawn mowers,
-**tuned for the GOAT O1200 LiDAR Pro** (O-series): live map with the mowed
-track and zone boundaries, cutting height control, battery telemetry, and a
-dashboard card with mower controls. The integration domain is
-**`ecovacs_goat`**.
+**tuned for the GOAT O1200 LiDAR Pro** (O-series): a live map built from the
+mower's own stored geometry (lawn outline, obstacles, mowed track, dock and
+mower position), cutting height control, battery telemetry, and a dashboard
+card with mower controls. The integration domain is **`ecovacs_goat`**.
 
-It gives you a lawn mower entity, useful sensors, mower settings, and an optional dashboard card with map, start, stop, dock, and cut-direction controls.
+It gives you a lawn mower entity, useful sensors, mower settings, and an optional dashboard card with the map and start / stop / dock / edge-trim controls.
 
 ![Ecovacs GOAT card screenshot](docs/images/ecovacs-goat-card.png)
 
@@ -35,7 +35,7 @@ For O-series mowers the integration:
 - Detects the model and reports it on the **GOAT model line** diagnostic sensor (with `family`, `map_dialect`, and an `experimental` flag).
 - Drives the lawn mower entity, start/pause/resume/stop/dock controls, status, battery, error, and the **live position map** (mower marker + path) from the shared position stream.
 - Decodes the **mowed track** (`onMapTrack` compact-LZMA pushes) and paints it on the card, resetting it when a new mowing task starts.
-- Decodes **zone boundaries** (`onArI` chain-coded polygons) and draws them as dashed outlines (scale calibration is best-effort; the raw chain code is kept in the live-map attributes).
+- Decodes the mower's own **lawn outline** (`onMI` chain-coded geometry) and the **obstacle shapes** it has learned (`onArI`, layer 3), and draws them the way the app does: a filled lawn with obstacle holes. The grid scale is derived from each map's own payload, and the decoded geometry is persisted so it survives restarts.
 - Exposes the **cutting height** (`AreaParameters.mowHeightLevel`, level x 10 mm on the O1200) as a number entity, plus battery temperature / current / voltage telemetry sensors from the `onFwBuryPoint-bd_*` stream.
 - Keeps the app-style live map session alive automatically while mowing (the `auto_live_map` option, on by default) so all of the above streams without the official app being open.
 - Shows the **RTK base station** on the map (from `getRTK`) where the G1 line shows UWB beacons.
@@ -51,9 +51,10 @@ The goal is to keep communication with the mower conservative: use pushed update
 
 - Start or resume mowing, stop mowing, and return to dock.
 - Battery, error, Wi-Fi, current mow, total mow, and consumable sensors.
-- Settings for rain delay, animal protection, AI recognition, edge mowing, safer mode, warning switches, cut direction, mowing efficiency, and obstacle avoidance.
-- Diagnostic model-line and feature information to help identify G1 variants.
-- Optional Lovelace card with a live map and clear mower controls.
+- Settings for cutting height, rain delay, animal protection, AI recognition, edge mowing, warning switches, cut direction, mowing efficiency, obstacle avoidance, and speaker volumes.
+- Edge trimming (the app's border-cut job) as its own button.
+- Timestamps and summaries of the last mowing and the last edge trim.
+- Optional Lovelace card that draws the mower's own map: lawn outline, obstacles, mowed track, dock, and mower.
 - Opt-in debug capture tools for troubleshooting.
 
 ## Installation With HACS
@@ -97,7 +98,7 @@ Just add **Ecovacs GOAT Card** from the custom card picker (you may need to relo
 
 > **Upgrading from a manual install (do this):** if you previously added a `/local/ecovacs_goat/ecovacs-goat-card.js` Lovelace resource, **remove it** in **Settings -> Dashboards -> Resources**, then hard-refresh your browser (Ctrl+Shift+R / Cmd+Shift+R). This is required: a dashboard card can only be registered once, and the old manual resource has no version in its URL, so your browser keeps loading the **cached old card** and never picks up the bundled one. You can also delete the copied `config/www/ecovacs_goat/ecovacs-goat-card.js` file.
 
-The card’s **keepalive** control starts a timed **`request_live_position_stream`** session so the mower behaves as if the official app map is open (MQTT-heavy updates). How that fits with the trace outline and the 60 second fallback is explained under **How It Behaves** below.
+While the card is visible it periodically asks the integration for an app-style live session, so the map animates like the official app; a hidden or closed card sends nothing.
 
 Example YAML:
 
@@ -108,11 +109,17 @@ battery_entity: sensor.mower_battery_level
 error_entity: sensor.mower_error
 area_entity: sensor.mower_mowing_area
 progress_entity: sensor.mower_mowing_progress
-direction_entity: number.mower_cut_direction
 stop_button: button.mower_end_mowing
+trim_button: button.mower_start_edge_trimming
 map_entity: sensor.mower_live_map
 name: Mower
 ```
+
+Layout options: `show_header`, `show_summary` and `show_buttons` (all `true` by
+default) turn off the card's own title, metric tiles and button row — useful
+when the dashboard already shows those and the card should only draw the map.
+`map_max_height` (CSS pixels, default `380`) caps the map height so a wide
+dashboard column does not push the controls below the fold.
 
 The card falls back to `sensor.mower_live_map` when `map_entity` is not set, so
 set it explicitly if your mower's entities use a different prefix — otherwise
@@ -128,17 +135,44 @@ The integration tries to be conservative with the mower and cloud connection:
 - It refreshes grouped state at startup and after meaningful MQTT changes (with a short debounced readback).
 - It avoids broad background polling loops.
 
-### Live map: position line, completed outline, and keepalive
+### Live map: what is drawn and where it comes from
 
-The map is built from two layers that update at different rates:
+The mower stores its map as vector geometry, so the card draws the same
+picture the official app does, from four layers:
 
-1. **Completed mowing outline (trace)** — A path from the mower cloud (`getMapTrace_V2`) or from MQTT `onMapTrace_V2`. It shows where the mower has already cut. Trace payloads are relatively heavy, so the integration **throttles** them: **MQTT trace pushes are ignored until enough heading change has accumulated from live position updates** (about **90°** in total, using the mower’s reported heading and/or the direction of travel between consecutive points, with a small minimum move distance so noise does not open the gate). When that threshold is reached, the integration schedules a trace refresh and accepts new trace data. **If `onPos` never arrives**, that heading gate never advances from turns alone, so while **mowing** the integration also **refreshes the trace on the same slow cloud poll** it uses for position when MQTT has gone stale (about **every 60 seconds**).
+1. **Lawn outline** — the mower's own stored map (`onMI`), an anchor point
+   plus an 8-direction chain code. The card fills it green. The mower only
+   sends it while docked and answers with an empty placeholder during a job,
+   so the integration persists it: it survives restarts and new jobs, and an
+   empty reply never clears it.
+2. **Obstacles** — chain-coded shapes the mower has learned (`onArI`,
+   layer 3), punched out of the lawn as holes with `fill-rule="evenodd"`.
+3. **Mowed track** — the current job's cut path, accumulated from
+   `onMapTrack` pushes and reset when a new job starts (as in the app).
+4. **Mower and dock** — the mower marker from `onPos`, the dock at the origin
+   `(0, 0)`; the dock *is* the coordinate frame's origin, so a docked mower
+   legitimately reports `(0, 0)`.
 
-2. **The “last line” / in-progress segment** — While **mowing**, the integration keeps a short polyline of recent **positions** (`position_history`): ideally one point per MQTT **`onPos`** message. If **`onPos` has been quiet for about 60 seconds**, a background task asks the cloud for **`getPos`** instead. When a new trace snapshot is applied, that live segment is **reset** so the stored outline and the line still being drawn stay aligned.
+All four share one coordinate frame. The chain code's grid scale is read out
+of the mower's own payload (`centerX`/`centerY` give the outline's bounding-box
+centre in map units, which pins map units per grid cell and is cross-checked
+across both axes), so gardens whose map uses a different grid still decode
+correctly; `CHAIN_STEP` in `map_geometry.py` is only the fallback. Both the
+derivation and the direction mapping are covered by tests against a real
+capture.
 
-**Keepalive (“someone is watching the map”)** — In the official app, opening the live map nudges the cloud and mower toward **faster `onPos`** and related map traffic. Home Assistant does not do that continuously. The service **`ecovacs_goat.request_live_position_stream`** asks ECOVACS for an **app-style map session** (map set, trace, map point) and, when you pass **`duration_seconds`**, keeps a **keepalive window** open: a background loop sends **`appping`**, repeats the stream request, and keeps **app-presence MQTT** active so the mower treats the session like an open app map. The optional **Ecovacs GOAT** card starts this for you (default **10 minutes** per activation) and passes **`force: true`**, which bypasses the coordinator’s usual spacing on stream requests so the loop can stay aggressive while the window runs. **While MQTT `onPos` is flowing**, the moving dot and the live segment update from those pushes, and accumulated heading opens the **trace** gate after turns. If **`onPos` stops** (no keepalive and no mower pushes), updates fall back to the **~60 second** mowing poll for both position and trace, which keeps the map roughly current but not smoothly animated.
+If a mower or firmware never sends an outline, the integration falls back to
+tracing the boundary of the accumulated coverage (`map_outline.py`); the
+outline's provenance is exposed as `outline_source` (`mower` or `coverage`)
+on the map sensor.
 
-Constants such as the 90Â° gate, 60 second stale interval, and stream request spacing live in `mower_coordinator.py` if you need exact values.
+**Position updates** — the moving marker follows MQTT `onPos`. If `onPos` has
+been quiet for about 60 seconds while mowing, a background task falls back to
+polling `getPos`. The service `ecovacs_goat.request_live_position_stream`
+asks ECOVACS for an app-style session so the mower streams positions the way
+it does with the app open; the `auto_live_map` option (on by default) keeps
+that session alive automatically while mowing, and the card refreshes it
+while it is visible.
 
 For technical protocol notes, see `docs/protocol-summary.md`.
 

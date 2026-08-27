@@ -205,6 +205,11 @@ async def refresh_rtk_map(
 
     state = await _refresh_map_info(api, device, state, capture)
 
+    # Note: getSpecialContour / getMapInfo look like they should return the
+    # lawn contour, but this firmware never answers them (each call just times
+    # out after ~20 s), so they are deliberately not requested. The outline
+    # arrives on onMI pushes, reliably while a job runs, and is persisted.
+
     # getMapTrack answers "fail" unless a job has produced a track; the live
     # track otherwise arrives on onMapTrack pushes.
     state = await _rtk_map_call(api, device, state, "getMapTrack", {}, capture)

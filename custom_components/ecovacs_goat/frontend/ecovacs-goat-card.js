@@ -11,8 +11,8 @@
  *   progress_entity: sensor.mower_mowing_progress
  *   error_entity: sensor.mower_error
  *   map_entity: sensor.mower_live_map
- *   direction_entity: number.mower_cut_direction
  *   stop_button: button.mower_end_mowing
+ *   trim_button: button.mower_start_edge_trimming
  */
 
 const DEFAULT_CONFIG = {
@@ -22,25 +22,12 @@ const DEFAULT_CONFIG = {
   progress_entity: "sensor.mower_mowing_progress",
   error_entity: "sensor.mower_error",
   map_entity: "sensor.mower_live_map",
-  map_static_url: "/local/ecovacs_goat/map-info.json?v=202604272002",
-  direction_entity: "number.mower_cut_direction",
   stop_button: "button.mower_end_mowing",
   trim_button: "button.mower_start_edge_trimming",
   name: "Mower",
   // Break the live trail into segments when consecutive points are further
   // apart than this (map units); gaps come from slow-poll fallback, not travel.
   trail_gap_limit: 500,
-  // How to paint the mower-reported trace: "trail" draws the mowed track as a
-  // wide polyline (O-series onMapTrack), "area" fills the closed trace shape
-  // (G1 heading-gated trace).
-  trace_style: "trail",
-  // Zone boundaries decoded from the mower's chain-coded records. Off until
-  // the per-map scale calibration is confirmed — wrongly scaled polygons
-  // stretch the viewport and push the real lawn into a corner.
-  show_zones: false,
-  // Zone anchor markers (getAreaSet "ar" records). Anchors of other lawns
-  // stretch the viewport the same way, so keep them off by default too.
-  show_areas: false,
   // Cap the rendered map height (CSS px). The SVG scales with the card
   // width, so in a wide dashboard column an uncapped map fills the screen
   // and pushes the action buttons below the fold.
@@ -55,7 +42,6 @@ const DEFAULT_CONFIG = {
 const CARD_FORMAT_VERSION = "rounded-summary-v2";
 const LIVE_STREAM_KEEPALIVE_MS = 65000;
 const KEEPALIVE_DURATION_SECONDS = 600;
-const KEEPALIVE_COUNTDOWN_TICK_MS = 1000;
 
 const STATE_META = {
   mowing: { label: "state_mowing", className: "active", icon: "mdi:robot-mower" },
@@ -86,7 +72,6 @@ const I18N = {
     end: "End",
     dock: "Dock",
     cancel_dock: "Cancel Dock",
-    keepalive: "Keepalive",
     trim: "Trim edges",
     mowing_area: "Mowing area",
     progress: "Progress",
@@ -108,7 +93,6 @@ const I18N = {
     end: "Zakończ",
     dock: "Do stacji",
     cancel_dock: "Anuluj powrót",
-    keepalive: "Na żywo",
     trim: "Przytnij krawędzie",
     mowing_area: "Obszar koszenia",
     progress: "Postęp",
@@ -165,7 +149,9 @@ const ACTION_OUTCOMES = {
     target: "entity",
     optimisticState: "paused",
     expectedStates: ["paused", "mowing", "idle"],
-    retryAfterMs: 5000,
+    // lawn_mower.dock is a toggle here: retrying it while the mower is
+    // still slowing down would START a new return-to-dock instead.
+    retryAfterMs: null,
     timeoutMs: 30000,
     failureMessage: "Mower did not cancel docking.",
   },
@@ -320,10 +306,6 @@ const STYLE = `
     stroke-linejoin: round;
     opacity: 0.55;
   }
-  .map-mowed-area {
-    fill: #b9ee98;
-    opacity: 0.55;
-  }
   .map-mowed-trail {
     fill: none;
     stroke: #b9ee98;
@@ -332,19 +314,27 @@ const STYLE = `
     stroke-linejoin: round;
     opacity: 0.5;
   }
-  .map-zone {
-    fill: rgba(79, 154, 67, 0.15);
-    stroke: #6fbf62;
+  /* The lawn is one path: the outline plus every obstacle as a subpath, so
+     evenodd punches the obstacles out as holes (what the app shows). */
+  .map-lawn {
+    fill: #8fd14f;
+    stroke: #ffffff;
+    stroke-width: 2;
+    stroke-linejoin: round;
+  }
+  .map-lawn-outline {
+    fill: none;
+    stroke: #4f9a43;
     stroke-width: 1.5;
-    stroke-dasharray: 6 4;
+    stroke-linejoin: round;
+    opacity: 0.65;
   }
-  .map-garden {
-    fill: #4f9a43;
-    opacity: 0.9;
-  }
-  .map-obstacle {
-    fill: #dfe5ec;
-    opacity: 0.95;
+  .map-obstacle-edge {
+    fill: none;
+    stroke: #6b7f8c;
+    stroke-width: 1.5;
+    stroke-linejoin: round;
+    opacity: 0.75;
   }
   .map-station {
     fill: #263847;
@@ -367,11 +357,6 @@ const STYLE = `
     stroke-width: 1.5;
     stroke-dasharray: 4 3;
   }
-  .map-area {
-    fill: #26a69a;
-    stroke: #fff;
-    stroke-width: 1.5;
-  }
   .map-mower {
     fill: #2196f3;
     stroke: #fff;
@@ -381,30 +366,6 @@ const STYLE = `
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 8px;
-  }
-  .direction {
-    margin: 14px 0 0;
-    padding: 10px;
-    border: 1px solid var(--divider-color);
-    border-radius: 10px;
-    background: var(--secondary-background-color);
-  }
-  .direction-header {
-    display: flex;
-    justify-content: space-between;
-    gap: 8px;
-    margin-bottom: 8px;
-    color: var(--secondary-text-color);
-    font-size: 0.85rem;
-  }
-  .direction-value {
-    color: var(--primary-text-color);
-    font-weight: 600;
-  }
-  .direction-presets {
-    display: grid;
-    grid-template-columns: repeat(5, minmax(0, 1fr));
-    gap: 6px;
   }
   button {
     min-height: 46px;
@@ -448,18 +409,6 @@ const STYLE = `
       transform: rotate(360deg);
     }
   }
-  .direction-presets button {
-    min-height: 46px;
-    padding: 8px 0;
-    font-size: 0.95rem;
-    font-weight: 600;
-    line-height: 1;
-  }
-  .direction-presets button.selected {
-    background: var(--primary-color);
-    color: var(--text-primary-color);
-    opacity: 1;
-  }
   button.primary {
     background: var(--primary-color);
     color: var(--text-primary-color);
@@ -471,10 +420,6 @@ const STYLE = `
   button.stop {
     background: var(--error-color, #d32f2f);
     color: #fff;
-  }
-  button.keepalive-active {
-    background: var(--primary-color);
-    color: var(--text-primary-color);
   }
   button:disabled {
     opacity: 0.45;
@@ -491,9 +436,6 @@ const STYLE = `
     .actions {
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
-    .direction-presets {
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-    }
   }
 `;
 
@@ -501,13 +443,25 @@ class EcovacsGoatCard extends HTMLElement {
   connectedCallback() {
     this._setupVisibilityTracking();
     this._maybeRequestLivePositionStream("card_connected");
+    // Renew the live stream periodically, but only while the card is
+    // actually visible — _maybeRequestLivePositionStream gates on tab and
+    // viewport visibility, so a closed/hidden card sends nothing. The mower
+    // accumulates the mowed area itself, so a card opened later still shows
+    // everything (matching the official app's model).
+    if (!this._liveStreamTimer) {
+      this._liveStreamTimer = window.setInterval(
+        () => this._maybeRequestLivePositionStream("card_interval"),
+        LIVE_STREAM_KEEPALIVE_MS
+      );
+    }
   }
 
   disconnectedCallback() {
     window.clearInterval(this._liveStreamTimer);
     this._liveStreamTimer = null;
-    window.clearInterval(this._keepaliveCountdownTimer);
-    this._keepaliveCountdownTimer = null;
+    // Pending action timers would otherwise keep firing service calls from a
+    // detached card (e.g. retrying dock after the user switched views).
+    this._clearPendingAction();
     if (this._visibilityHandler) {
       document.removeEventListener("visibilitychange", this._visibilityHandler);
       this._visibilityHandler = null;
@@ -524,7 +478,6 @@ class EcovacsGoatCard extends HTMLElement {
 
   set hass(hass) {
     this._hass = hass;
-    this._loadStaticMap();
     this._checkPendingOutcome();
     if (!this.config || !this.querySelector("ha-card")) {
       this.render();
@@ -562,7 +515,6 @@ class EcovacsGoatCard extends HTMLElement {
     const progress = this._state(this.config.progress_entity);
     const battery = this._state(this.config.battery_entity);
     const error = this._state(this.config.error_entity);
-    const direction = this._state(this.config.direction_entity);
     const map = this._state(this.config.map_entity);
     const unavailable = !mower || state === "unavailable";
     const returning = state === "returning";
@@ -640,9 +592,8 @@ class EcovacsGoatCard extends HTMLElement {
         ${summaryHtml}
         ${this._errorLine(error)}
 
-        <div class="map-slot">${this._mapPanel(map, state)}</div>
+        <div class="map-slot">${this._mapPanel(map, actualState)}</div>
         ${actionsHtml}
-        ${this._directionControl(direction)}
       </ha-card>
     `;
 
@@ -663,11 +614,6 @@ class EcovacsGoatCard extends HTMLElement {
     );
     this.querySelector('[data-action="trim"]')?.addEventListener("click", () =>
       this._runStateAction("trim")
-    );
-    this.querySelectorAll("[data-direction]").forEach((button) =>
-      button.addEventListener("click", () =>
-        this._runDirectionAction(Number(button.dataset.direction))
-      )
     );
     this._nonMapSignatureValue = this._nonMapSignature();
   }
@@ -711,7 +657,6 @@ class EcovacsGoatCard extends HTMLElement {
       entityState(this.config.progress_entity),
       entityState(this.config.battery_entity),
       entityState(this.config.error_entity),
-      entityState(this.config.direction_entity),
       this._pendingAction?.key,
       this._pendingAction?.optimisticState,
     ]);
@@ -724,7 +669,10 @@ class EcovacsGoatCard extends HTMLElement {
       return;
     }
     const mower = this._state(this.config.entity);
-    const mowerState = this._displayState(mower?.state || "unavailable");
+    // The map must follow the REAL mower state, not the optimistic one: an
+    // optimistic "mowing" after a failed start would wipe the sticky trail
+    // before the mower ever moved.
+    const mowerState = mower?.state || "unavailable";
     const mapState = this._state(this.config.map_entity);
     const resolved = this._resolveMapData(mapState, mowerState);
 
@@ -765,26 +713,6 @@ class EcovacsGoatCard extends HTMLElement {
     this._lastMapDataSignature = dataSignature;
   }
 
-  _updateKeepaliveButton() {
-    const button = this.querySelector('[data-action="keepalive"]');
-    if (!button) {
-      return;
-    }
-    const remaining = this._keepaliveRemainingSeconds();
-    const active = remaining > 0;
-    button.className = this._buttonClass(active ? "keepalive-active" : "", "keepalive");
-    const icon = button.querySelector("ha-icon");
-    if (icon) {
-      icon.setAttribute("icon", active ? "mdi:timer-sand" : "mdi:access-point-network");
-    }
-    const label = button.querySelector("span");
-    if (label) {
-      label.textContent = active
-        ? this._formatKeepaliveRemaining(remaining)
-        : "Keepalive";
-    }
-  }
-
   _runStateAction(key) {
     const outcome = ACTION_OUTCOMES[key];
     const entityId = outcome?.target ? this.config[outcome.target] : undefined;
@@ -816,48 +744,11 @@ class EcovacsGoatCard extends HTMLElement {
       .catch(() => this._failPendingAction(key, outcome.failureMessage));
   }
 
-  _runDirectionAction(value) {
-    if (!Number.isFinite(value) || !this.config.direction_entity) {
-      return;
-    }
-    this._beginPendingAction({
-      key: `direction-${value}`,
-      type: "direction",
-      domain: "number",
-      service: "set_value",
-      entityId: this.config.direction_entity,
-      serviceData: { value },
-      expectedValue: value,
-      retryAfterMs: 5000,
-      timeoutMs: 16000,
-      failureMessage: `Cut direction did not change to ${value} degrees.`,
-      attempts: 1,
-    });
-    this._callAction("number", "set_value", this.config.direction_entity, { value }).catch(
-      () => this._failPendingAction(`direction-${value}`, `Could not set cut direction to ${value} degrees.`)
-    );
-  }
-
-  _runKeepaliveAction() {
-    this._startKeepalive("card_keepalive_button", true);
-  }
-
-  _startKeepalive(reason, surfaceErrors = false) {
-    this._keepaliveUntil = Date.now() + KEEPALIVE_DURATION_SECONDS * 1000;
-    this._startKeepaliveCountdown();
-    const request = this._maybeRequestLivePositionStream(
-      reason,
-      true,
-      KEEPALIVE_DURATION_SECONDS,
-      surfaceErrors
-    );
-    request?.catch(() => {
-      this._keepaliveUntil = 0;
-      this._stopKeepaliveCountdown();
-      this._showToast("Could not start mower keepalive.");
-      this.render();
-    });
-    this.render();
+  _startKeepalive(reason) {
+    // After a user action, ask the integration for an app-style live window
+    // so the map animates immediately; failures are non-critical (the
+    // integration's auto_live_map keepalive covers mowing regardless).
+    this._maybeRequestLivePositionStream(reason, true, KEEPALIVE_DURATION_SECONDS);
   }
 
   _beginPendingAction(action) {
@@ -875,22 +766,24 @@ class EcovacsGoatCard extends HTMLElement {
       return;
     }
 
-    action.retryTimer = window.setTimeout(() => {
-      if (!this._pendingAction || this._pendingAction.key !== action.key) {
-        return;
-      }
-      if (
-        this._pendingOutcomeReached(action) ||
-        this._pendingActionIsSettling(action) ||
-        action.attempts >= 2
-      ) {
-        return;
-      }
-      action.attempts += 1;
-      this._callAction(action.domain, action.service, action.entityId, action.serviceData).catch(
-        () => this._failPendingAction(action.key, action.failureMessage)
-      );
-    }, action.retryAfterMs);
+    if (action.retryAfterMs) {
+      action.retryTimer = window.setTimeout(() => {
+        if (!this._pendingAction || this._pendingAction.key !== action.key) {
+          return;
+        }
+        if (
+          this._pendingOutcomeReached(action) ||
+          this._pendingActionIsSettling(action) ||
+          action.attempts >= 2
+        ) {
+          return;
+        }
+        action.attempts += 1;
+        this._callAction(action.domain, action.service, action.entityId, action.serviceData).catch(
+          () => this._failPendingAction(action.key, action.failureMessage)
+        );
+      }, action.retryAfterMs);
+    }
 
     action.timeoutTimer = window.setTimeout(() => {
       if (!this._pendingAction || this._pendingAction.key !== action.key) {
@@ -915,9 +808,6 @@ class EcovacsGoatCard extends HTMLElement {
     if (action.type === "state") {
       return this._stateOutcomeReached(action);
     }
-    if (action.type === "direction") {
-      return this._directionOutcomeReached(action);
-    }
     return false;
   }
 
@@ -931,11 +821,6 @@ class EcovacsGoatCard extends HTMLElement {
   _stateOutcomeReached(action) {
     const state = this._state(this.config.entity)?.state;
     return action.expectedStates?.includes(state);
-  }
-
-  _directionOutcomeReached(action) {
-    const value = Number(this._state(action.entityId)?.state);
-    return Number.isFinite(value) && Math.round(value) === action.expectedValue;
   }
 
   _failPendingAction(key, message) {
@@ -1019,36 +904,6 @@ class EcovacsGoatCard extends HTMLElement {
         }
         return false;
       });
-  }
-
-  _startKeepaliveCountdown() {
-    if (this._keepaliveCountdownTimer) {
-      return;
-    }
-    this._keepaliveCountdownTimer = window.setInterval(() => {
-      if (this._keepaliveRemainingSeconds() <= 0) {
-        this._stopKeepaliveCountdown();
-      }
-      this._updateKeepaliveButton();
-    }, KEEPALIVE_COUNTDOWN_TICK_MS);
-  }
-
-  _stopKeepaliveCountdown() {
-    window.clearInterval(this._keepaliveCountdownTimer);
-    this._keepaliveCountdownTimer = null;
-  }
-
-  _keepaliveRemainingSeconds() {
-    if (!this._keepaliveUntil) {
-      return 0;
-    }
-    return Math.max(0, Math.ceil((this._keepaliveUntil - Date.now()) / 1000));
-  }
-
-  _formatKeepaliveRemaining(seconds) {
-    const minutes = Math.floor(seconds / 60);
-    const remainingSeconds = seconds % 60;
-    return `${minutes}:${String(remainingSeconds).padStart(2, "0")}`;
   }
 
   _cardIsVisible() {
@@ -1140,7 +995,6 @@ class EcovacsGoatCard extends HTMLElement {
     if (hasAttributes) {
       const map = mapState.attributes;
       const liveInfo = map.info || {};
-      const staticInfo = this._staticMapInfo || {};
 
       const keep = (key, value) => {
         if (Array.isArray(value)) {
@@ -1152,11 +1006,8 @@ class EcovacsGoatCard extends HTMLElement {
         }
       };
 
-      keep("outline", liveInfo.outline?.length ? liveInfo.outline : staticInfo.outline);
-      keep(
-        "obstacles",
-        liveInfo.obstacles?.length ? liveInfo.obstacles : staticInfo.obstacles
-      );
+      keep("outline", liveInfo.outline);
+      keep("obstacles", liveInfo.obstacles);
       keep("position_history", map.position_history);
       keep("tracePath", map.trace?.path);
       keep("current_position", map.current_position);
@@ -1199,26 +1050,35 @@ class EcovacsGoatCard extends HTMLElement {
   }
 
   // Cheap fingerprint of the resolved map inputs. Used to skip rendering
-  // entirely when an unrelated `set hass` update arrives. Intentionally avoids
-  // the projection/animation work (and its side effects) in `_computeMapRender`.
+  // entirely when an unrelated `set hass` update arrives. This runs on EVERY
+  // hass update in HA, so it must stay O(1): array lengths plus the last
+  // point stand in for full contents (the trail/history only ever append,
+  // and a same-length change always moves the newest point).
   _mapDataSignature(resolved, mowerState) {
     if (!resolved || !resolved.available) {
       return "none";
     }
-    return JSON.stringify([
+    const arraySig = (value) => {
+      if (!Array.isArray(value) || !value.length) {
+        return "0";
+      }
+      const last = value[value.length - 1];
+      return `${value.length}:${last?.x ?? ""},${last?.y ?? ""}`;
+    };
+    return [
       mowerState,
-      resolved.outline,
-      resolved.obstacles,
-      resolved.position_history,
-      resolved.tracePath,
-      resolved.current_position,
-      resolved.charge_positions,
-      resolved.uwb_positions,
-      resolved.rtk_station,
-      resolved.areas,
-      resolved.no_go_zones,
-      resolved.zones,
-    ]);
+      arraySig(resolved.outline),
+      arraySig(resolved.obstacles),
+      arraySig(resolved.position_history),
+      arraySig(resolved.tracePath),
+      JSON.stringify(resolved.current_position ?? null),
+      arraySig(resolved.charge_positions),
+      arraySig(resolved.uwb_positions),
+      JSON.stringify(resolved.rtk_station ?? null),
+      arraySig(resolved.areas),
+      arraySig(resolved.no_go_zones),
+      arraySig(resolved.zones),
+    ].join("|");
   }
 
   _computeMapRender(resolved, mowerState) {
@@ -1231,12 +1091,6 @@ class EcovacsGoatCard extends HTMLElement {
     const livePath = this._positions(resolved.position_history);
     const tracePath = this._positions(resolved.tracePath);
     const mowedArea = tracePath;
-    const zonePolygons =
-      this.config.show_zones && Array.isArray(resolved.zones)
-        ? resolved.zones
-            .map((zone) => this._positions(zone?.polygon))
-            .filter((polygon) => polygon.length >= 3)
-        : [];
     const charge = this._positions(resolved.charge_positions);
     const rawCurrent = this._position(resolved.current_position);
     const current = this._displayMowerPosition({
@@ -1246,9 +1100,6 @@ class EcovacsGoatCard extends HTMLElement {
     });
     const beacons = this._positions(resolved.uwb_positions);
     const rtkStation = this._position(resolved.rtk_station);
-    const areas = this.config.show_areas
-      ? this._positions(resolved.areas)
-      : [];
     const noGoZones = this._polygons(resolved.no_go_zones);
 
     const points = [
@@ -1260,9 +1111,7 @@ class EcovacsGoatCard extends HTMLElement {
       ...charge,
       ...beacons,
       ...(rtkStation ? [rtkStation] : []),
-      ...areas,
       ...noGoZones.flat(),
-      ...zonePolygons.flat(),
     ];
     if (!points.length) {
       return { empty: true };
@@ -1274,14 +1123,19 @@ class EcovacsGoatCard extends HTMLElement {
 
     // Static layers: only depend on the persistent geometry + viewport. When
     // these are unchanged we can patch the dynamic layers in place.
+    // The lawn: outline filled, obstacles punched out as holes by evenodd —
+    // the same picture the app draws.
     const gardenPath = this._closedPath(garden, bounds, width, height);
-    const gardenMarkup = gardenPath
-      ? `<path class="map-garden" d="${gardenPath}"></path>`
-      : "";
-    const obstacleMarkup = obstacles
+    const obstaclePaths = obstacles
       .map((obstacle) => this._closedPath(obstacle, bounds, width, height))
-      .filter(Boolean)
-      .map((path) => `<path class="map-obstacle" d="${path}"></path>`)
+      .filter(Boolean);
+    const gardenMarkup = gardenPath
+      ? `<path class="map-lawn" fill-rule="evenodd" d="${
+          gardenPath + obstaclePaths.join("")
+        }"></path><path class="map-lawn-outline" d="${gardenPath}"></path>`
+      : "";
+    const obstacleMarkup = obstaclePaths
+      .map((path) => `<path class="map-obstacle-edge" d="${path}"></path>`)
       .join("");
     const stationMarkup = charge
       .map((position) => {
@@ -1293,17 +1147,6 @@ class EcovacsGoatCard extends HTMLElement {
       .map((zone) => this._closedPath(zone, bounds, width, height))
       .filter(Boolean)
       .map((path) => `<path class="map-nogo" d="${path}"></path>`)
-      .join("");
-    const zoneMarkup = zonePolygons
-      .map((polygon) => this._closedPath(polygon, bounds, width, height))
-      .filter(Boolean)
-      .map((path) => `<path class="map-zone" d="${path}"></path>`)
-      .join("");
-    const areaMarkup = areas
-      .map((position) => {
-        const point = this._project(position, bounds, width, height);
-        return `<circle class="map-area" cx="${point.x}" cy="${point.y}" r="5"></circle>`;
-      })
       .join("");
     const beaconMarkup = beacons
       .map((position) => {
@@ -1321,11 +1164,7 @@ class EcovacsGoatCard extends HTMLElement {
       : "";
 
     // Dynamic layers: change on (almost) every position update.
-    const traceAsArea = this.config.trace_style === "area";
-    const mowedAreaPath = traceAsArea
-      ? this._closedPath(mowedArea, bounds, width, height)
-      : this._trailPath(mowedArea, bounds, width, height);
-    const mowedAreaClass = traceAsArea ? "map-mowed-area" : "map-mowed-trail";
+    const mowedAreaPath = this._trailPath(mowedArea, bounds, width, height);
     const liveSvgPath = this._trailPath(livePath, bounds, width, height);
     const currentPoint = current ? this._project(current, bounds, width, height) : null;
     const currentHeading = current
@@ -1349,11 +1188,8 @@ class EcovacsGoatCard extends HTMLElement {
       obstacleMarkup,
       stationMarkup,
       noGoMarkup,
-      zoneMarkup,
-      areaMarkup,
       beaconMarkup,
       rtkMarkup,
-      mowedAreaClass,
     ]);
 
     return {
@@ -1363,12 +1199,9 @@ class EcovacsGoatCard extends HTMLElement {
       obstacleMarkup,
       stationMarkup,
       noGoMarkup,
-      zoneMarkup,
-      areaMarkup,
       beaconMarkup,
       rtkMarkup,
       mowedAreaPath,
-      mowedAreaClass,
       liveSvgPath,
       currentPoint,
       currentHeading,
@@ -1383,12 +1216,10 @@ class EcovacsGoatCard extends HTMLElement {
       <svg viewBox="0 0 ${render.width} ${render.height}" role="img" aria-label="Live mower map">
         ${render.gardenMarkup}
         ${render.obstacleMarkup}
-        ${render.zoneMarkup}
-        <path class="${render.mowedAreaClass}" data-layer="mowed"${render.mowedAreaPath ? ` d="${render.mowedAreaPath}"` : ""}></path>
+        <path class="map-mowed-trail" data-layer="mowed"${render.mowedAreaPath ? ` d="${render.mowedAreaPath}"` : ""}></path>
         <path class="map-trail"${render.liveSvgPath ? ` d="${render.liveSvgPath}"` : ""}></path>
         ${render.stationMarkup}
         ${render.noGoMarkup}
-        ${render.areaMarkup}
         ${render.beaconMarkup}
         ${render.rtkMarkup}
         ${render.mowerMarkup}
@@ -1440,68 +1271,24 @@ class EcovacsGoatCard extends HTMLElement {
     return rawCurrent;
   }
 
-  _fastestMowerPosition(rawCurrent, livePath, tracePath) {
-    const traceLead = this._traceLeadPosition(tracePath, rawCurrent);
-    if (!traceLead) {
-      return rawCurrent;
-    }
-
-    const previous = this._lastMowerPosition || this._lastPathPosition(livePath);
-    if (!previous) {
-      return rawCurrent || traceLead;
-    }
-
-    const rawDistance = rawCurrent
-      ? Math.hypot(rawCurrent.x - previous.x, rawCurrent.y - previous.y)
-      : 0;
-    const traceDistance = Math.hypot(traceLead.x - previous.x, traceLead.y - previous.y);
-    return traceDistance > rawDistance + 50 ? traceLead : rawCurrent || traceLead;
-  }
-
-  _traceLeadPosition(tracePath, rawCurrent) {
-    if (!tracePath.length) {
-      this._lastTracePointKeys = null;
-      return null;
-    }
-
-    const pointKeys = new Set(tracePath.map((position) => this._positionKey(position)));
-    const previousKeys = this._lastTracePointKeys;
-    this._lastTracePointKeys = pointKeys;
-    if (!previousKeys) {
-      return null;
-    }
-
-    const changed = tracePath.filter((position) => !previousKeys.has(this._positionKey(position)));
-    if (!changed.length) {
-      return null;
-    }
-
-    const anchor = rawCurrent || this._lastMowerPosition || this._lastPathPosition(tracePath);
-    if (!anchor) {
-      return changed[changed.length - 1];
-    }
-    return changed.reduce((closest, position) => {
-      const closestDistance = Math.hypot(closest.x - anchor.x, closest.y - anchor.y);
-      const distance = Math.hypot(position.x - anchor.x, position.y - anchor.y);
-      return distance < closestDistance ? position : closest;
-    }, changed[0]);
-  }
-
   _lastPathPosition(path) {
     return path.length ? path[path.length - 1] : null;
   }
 
-  _positionKey(position) {
-    return `${Math.round(position.x)}:${Math.round(position.y)}`;
-  }
-
   _mapBounds(points) {
-    const xs = points.map((point) => point.x);
-    const ys = points.map((point) => point.y);
-    let minX = Math.min(...xs);
-    let maxX = Math.max(...xs);
-    let minY = Math.min(...ys);
-    let maxY = Math.max(...ys);
+    // A loop instead of Math.min(...xs): the sticky trail can grow to tens of
+    // thousands of points, and spreading that many arguments overflows the
+    // JS engine's argument limit (RangeError).
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+    for (const point of points) {
+      if (point.x < minX) minX = point.x;
+      if (point.x > maxX) maxX = point.x;
+      if (point.y < minY) minY = point.y;
+      if (point.y > maxY) maxY = point.y;
+    }
 
     if (minX === maxX) {
       minX -= 1000;
@@ -1577,7 +1364,7 @@ class EcovacsGoatCard extends HTMLElement {
       if (heading !== null) {
         return heading;
       }
-      return Number(charge[0].a || current.a || 0) + 180;
+      return Number(charge[0].a ?? current.a ?? 0) + 180;
     }
     return this._heading(current, path);
   }
@@ -1696,20 +1483,6 @@ class EcovacsGoatCard extends HTMLElement {
       : [];
   }
 
-  _combinedPath(primary, secondary) {
-    const combined = [];
-    const seen = new Set();
-    [...primary, ...secondary].forEach((position) => {
-      const key = `${Math.round(position.x)}:${Math.round(position.y)}`;
-      if (seen.has(key)) {
-        return;
-      }
-      seen.add(key);
-      combined.push(position);
-    });
-    return combined;
-  }
-
   _position(value) {
     if (!value || value.x === undefined || value.y === undefined) {
       return null;
@@ -1740,45 +1513,6 @@ class EcovacsGoatCard extends HTMLElement {
     ).split("-")[0];
     const table = I18N[language] || I18N.en;
     return table[key] || I18N.en[key] || key;
-  }
-
-  _directionControl(direction) {
-    // No configured (or resolvable) cut-direction entity: the dashboard
-    // exposes the setting elsewhere, so drop the whole control.
-    if (!direction) {
-      return "";
-    }
-    const value = Number(direction?.state);
-    const safeValue = Number.isFinite(value) ? Math.round(value) : 90;
-    const pendingValue =
-      this._pendingAction?.type === "direction"
-        ? this._pendingAction.expectedValue
-        : null;
-    const displayValue = Number.isFinite(pendingValue) ? pendingValue : safeValue;
-    return `
-      <div class="direction">
-        <div class="direction-header">
-          <span>Cut direction</span>
-          <span class="direction-value">${Number.isFinite(displayValue) ? `${displayValue}°` : "Unknown"}</span>
-        </div>
-        <div class="direction-presets">
-          ${[0, 45, 90, 135, 180]
-            .map(
-              (angle) => `
-                <button class="${[
-                  displayValue === angle ? "selected" : "",
-                  this._pendingAction?.key === `direction-${angle}` ? "pending" : "",
-                ]
-                  .filter(Boolean)
-                  .join(" ")}" data-direction="${angle}">
-                  ${angle}°
-                </button>
-              `
-            )
-            .join("")}
-        </div>
-      </div>
-    `;
   }
 
   _formatState(stateObj) {
@@ -1881,45 +1615,10 @@ class EcovacsGoatCard extends HTMLElement {
       .replace(/&/g, "&amp;")
       .replace(/</g, "&lt;")
       .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;");
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
   }
 
-  _loadStaticMap() {
-    const url = this.config?.map_static_url;
-    if (!url || this._staticMapInfo !== undefined || this._staticMapPromise) {
-      return;
-    }
-    this._staticMapPromise = fetch(url)
-      .then((response) => (response.ok ? response.json() : null))
-      .then((data) => {
-        this._staticMapInfo = data || null;
-        this._staticMapPromise = null;
-        this.render();
-      })
-      .catch(() => {
-        this._staticMapInfo = null;
-        this._staticMapPromise = null;
-      });
-  }
-
-  _call(domain, service, entityId) {
-    if (!entityId) {
-      return;
-    }
-    this._hass.callService(domain, service, {
-      entity_id: entityId,
-    });
-  }
-
-  _setDirection(value) {
-    if (!Number.isFinite(value) || !this.config.direction_entity) {
-      return;
-    }
-    this._hass.callService("number", "set_value", {
-      entity_id: this.config.direction_entity,
-      value,
-    });
-  }
 }
 
 // Guard against double-registration: the integration now auto-loads this card,
@@ -1932,6 +1631,6 @@ if (!customElements.get("ecovacs-goat-card")) {
   window.customCards.push({
     type: "ecovacs-goat-card",
     name: "Ecovacs GOAT Card",
-    description: "Control an ECOVACS GOAT mower with explicit start, stop, dock, and live-map keepalive buttons.",
+    description: "Control an ECOVACS GOAT mower: live map, start/pause, dock, and edge trimming.",
   });
 }

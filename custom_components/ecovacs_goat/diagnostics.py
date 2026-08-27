@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import partial
 from typing import Any
 
 from homeassistant.components.diagnostics import async_redact_data
@@ -41,7 +42,10 @@ async def async_get_config_entry_diagnostics(
     ]
     diag["debug_capture"] = {
         "summary": controller.debug_capture.summary(),
-        "recent_events": controller.debug_capture.recent_events(limit=100),
+        # Reads event files from disk — keep it off the event loop.
+        "recent_events": await hass.async_add_executor_job(
+            partial(controller.debug_capture.recent_events, limit=100)
+        ),
     }
 
     return diag

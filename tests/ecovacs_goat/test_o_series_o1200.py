@@ -138,12 +138,12 @@ def test_get_area_set_layer_still_uses_subsets_shape() -> None:
     assert [(p.x, p.y) for p in state.map.areas] == [(-14600, 16950)]
 
 
-def test_on_ari_decodes_zone_boundaries() -> None:
-    """onArI zone records decode into anchored polygons with raw chain codes."""
+def test_on_ari_decodes_obstacle_shapes() -> None:
+    """onArI layer 3 carries the obstacle shapes the app paints on the lawn."""
     blob = _compact_lzma_blob(
         [
             ["1", "1", "0"],
-            ["1", "3", "1", "100;-14600,16950;4328(2)6", "103;-19300,15550;38"],
+            ["1", "3", "2", "100;-14600,16950;4328(2)6", "103;-19300,15550;38"],
             ["1", "4", "0"],
         ]
     )
@@ -153,17 +153,53 @@ def test_on_ari_decodes_zone_boundaries() -> None:
         {"mid": "1", "batid": "dknkcc", "serial": "1", "index": "0", "info": blob, "infoSize": 335},
     )
 
-    assert [zone.zone_id for zone in state.map.zones] == ["100", "103"]
-    zone = state.map.zones[0]
-    assert zone.anchor == MapPosition(x=-14600, y=16950)
-    assert zone.boundary_code == "4328(2)6"
-    # Chain code "4328(2)6" is 4,3,2,8,8,8,6 -> anchor + 7 steps.
-    assert len(zone.polygon) == 8
-    assert zone.polygon[0] == MapPosition(x=-14600, y=16950)
-    # Zone 103's short chain still decodes (anchor + 2 steps); the raw code is
-    # preserved for later calibration.
-    assert len(state.map.zones[1].polygon) == 3
-    assert state.map.zones[1].boundary_code == "38"
+    obstacles = state.map.info.obstacles
+    assert len(obstacles) == 2
+    # Anchors are kept verbatim; the chain walks from there in CHAIN_STEP units.
+    assert obstacles[0][0] == MapPosition(x=-14600, y=16950)
+    assert obstacles[1][0] == MapPosition(x=-19300, y=15550)
+    # Collinear runs are collapsed, so every shape stays a polygon but never
+    # carries a point per chain step.
+    assert all(len(shape) >= 3 for shape in obstacles)
+
+
+def test_on_mi_decodes_lawn_outline() -> None:
+    """onMI carries the mower's own lawn outline (the shape the app fills)."""
+    blob = _compact_lzma_blob([["1", "s1;1;-24900,3750;3(3)1(3)7(3)5(3)"], ["2", "1"]])
+    state = _mqtt(
+        MowerState(),
+        "onMI",
+        {"mid": "1", "type": "-1", "info": blob, "infoSize": 120},
+    )
+
+    outline = state.map.info.outline
+    # A 4x4 square walked in unit steps collapses to its corners.
+    assert len(outline) == 5
+    assert outline[0] == MapPosition(x=-24900, y=3750)
+    assert state.map.info.outline_source == "mower"
+    assert state.map.mid == "1"
+
+
+def test_on_mi_placeholder_keeps_stored_outline() -> None:
+    """A mid-job placeholder must not wipe the persisted outline."""
+    stored = _mqtt(
+        MowerState(),
+        "onMI",
+        {
+            "mid": "1",
+            "type": "-1",
+            "info": _compact_lzma_blob([["1", "s1;1;-24900,3750;3(3)1(3)7(3)5(3)"]]),
+        },
+    )
+    assert stored.map.info.outline
+
+    # While a job runs the mower answers with an empty shape.
+    after = _mqtt(
+        stored,
+        "onMI",
+        {"mid": "1", "type": "-1", "info": _compact_lzma_blob([["1", "s1;0;"], ["2", "0"]])},
+    )
+    assert after.map.info.outline == stored.map.info.outline
 
 
 def test_on_area_parameter_updates_settings() -> None:
@@ -266,7 +302,8 @@ def test_on_stats_progress_from_area_ratio() -> None:
         "onStats",
         {"time": 11297, "area": 2526725, "mowedArea": 1746900},
     )
-    assert state.stats.progress == pytest.approx(69.1)
+    # Progress is rounded to whole percent to keep the history clean.
+    assert state.stats.progress == pytest.approx(69)
     assert state.stats.job_area == 2526725
     assert state.stats.area == 1746900
 
@@ -555,3 +592,24 @@ def test_last_jobs_survive_state_updates() -> None:
         state, "getTotalStats", {"area": 4963, "time": 177060, "count": 45}
     )
     assert state.last_jobs == {"auto": record}
+
+
+def test_partial_protect_state_does_not_clear_active_protection() -> None:
+    """A partial getProtectState push must not drop an active protection.
+
+    Observed live: during the animal-protection window the sensor flapped
+    animal -> none -> animal every few seconds, because pushes that omit
+    ``isAnimProtect`` rebuilt every flag from scratch. That made the dashboard
+    unblock the controls while the mower was in fact refusing to start.
+    """
+    state = _mqtt(MowerState(), "onProtectState", {"isAnimProtect": 1, "isRainProtect": 0})
+    assert state.protections.animal_active is True
+
+    # A later push carries only the rain flags.
+    state = _mqtt(state, "onProtectState", {"isRainProtect": 0, "isRainDelay": 0})
+    assert state.protections.animal_active is True
+    assert state.protections.rain_active is False
+
+    # An explicit zero does clear it.
+    state = _mqtt(state, "onProtectState", {"isAnimProtect": 0})
+    assert state.protections.animal_active is False

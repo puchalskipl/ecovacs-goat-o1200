@@ -7,6 +7,7 @@ import base64
 from collections.abc import Callable
 import json
 import logging
+import socket
 import ssl
 from time import monotonic
 from typing import Any
@@ -20,6 +21,53 @@ from .mower_models import MowerDevice
 _LOGGER = logging.getLogger(__name__)
 APP_PRESENCE_FEATURE_META = {"fv": "1.0.0", "wv": "v2.1.0"}
 APP_PRESENCE_ROLE_META = {"app": "user", "st": 10}
+# Reconnect backoff for the push client after an unexpected disconnect.
+RECONNECT_INITIAL_DELAY_SECONDS = 60
+RECONNECT_MAX_DELAY_SECONDS = 600
+
+# Whether a broker passed certificate verification, cached per host so the
+# probe runs once per HA start.
+_TLS_VERIFY_CACHE: dict[str, bool] = {}
+
+
+def _probe_tls_verification(host: str, port: int) -> bool:
+    """Return whether the broker's certificate passes default verification."""
+    context = ssl.create_default_context()
+    try:
+        with socket.create_connection((host, port), timeout=10) as sock:
+            with context.wrap_socket(sock, server_hostname=host):
+                return True
+    except ssl.SSLError:
+        return False
+    except OSError:
+        # Network problem, not a certificate problem — prefer verification;
+        # the subsequent connect will fail and be retried either way.
+        return True
+
+
+def _tls_context_for(host: str, port: int) -> ssl.SSLContext:
+    """Return a TLS context for the broker, verified whenever possible.
+
+    A token used as the MQTT password is a full account credential, so an
+    unverified connection is only a last resort for brokers whose certificate
+    genuinely fails validation — and it is logged loudly.
+    """
+    verify = _TLS_VERIFY_CACHE.get(host)
+    if verify is None:
+        verify = _probe_tls_verification(host, port)
+        _TLS_VERIFY_CACHE[host] = verify
+        if not verify:
+            _LOGGER.warning(
+                "ECOVACS MQTT broker %s failed certificate verification; "
+                "falling back to an unverified TLS connection",
+                host,
+            )
+    if verify:
+        return ssl.create_default_context()
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    return context
 
 
 class MowerMqttClient:
@@ -39,9 +87,12 @@ class MowerMqttClient:
         self._on_message = on_message
         self._debug_capture = debug_capture
         self._client: mqtt.Client | None = None
+        self._reconnect_task: asyncio.Task[None] | None = None
+        self._stopped = False
 
     async def start(self) -> None:
         """Connect and subscribe to mower MQTT push topics."""
+        self._stopped = False
         credentials = await self._api.authenticate()
         client_id = f"{credentials.user_id}@ecouser/{self._api.client_device_id}"
         client = mqtt.Client(
@@ -50,9 +101,11 @@ class MowerMqttClient:
         )
         client.username_pw_set(credentials.user_id, credentials.token)
 
-        ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        ssl_context.check_hostname = False
-        ssl_context.verify_mode = ssl.CERT_NONE
+        host = f"mq-{self._api.continent}.ecouser.net"
+        port = 443
+        ssl_context = await self._loop.run_in_executor(
+            None, _tls_context_for, host, port
+        )
         client.tls_set_context(ssl_context)
 
         client.on_connect = self._on_connect
@@ -60,19 +113,61 @@ class MowerMqttClient:
         client.on_disconnect = self._on_disconnect
         self._client = client
 
-        host = f"mq-{self._api.continent}.ecouser.net"
-        port = 443
         await self._loop.run_in_executor(None, client.connect, host, port, 60)
         client.loop_start()
 
     async def stop(self) -> None:
         """Disconnect MQTT."""
+        self._stopped = True
+        if self._reconnect_task is not None:
+            self._reconnect_task.cancel()
+            self._reconnect_task = None
+        await self._async_shutdown_client()
+
+    async def _async_shutdown_client(self) -> None:
         if self._client is None:
             return
         client = self._client
         self._client = None
         await self._loop.run_in_executor(None, client.disconnect)
-        client.loop_stop()
+        # loop_stop joins the paho thread — keep that off the event loop too.
+        await self._loop.run_in_executor(None, client.loop_stop)
+
+    def _schedule_reconnect(self) -> None:
+        """Arrange a credential-refreshing reconnect (event loop only)."""
+        if self._stopped:
+            return
+        if self._reconnect_task is not None and not self._reconnect_task.done():
+            return
+        self._reconnect_task = self._loop.create_task(self._async_reconnect())
+
+    async def _async_reconnect(self) -> None:
+        """Rebuild the client with fresh credentials until push works again.
+
+        paho's built-in reconnect reuses the password from connect time; once
+        the portal token rotates the broker rejects it forever, silently
+        killing all pushes. Give paho a grace period first, then rebuild.
+        """
+        delay = RECONNECT_INITIAL_DELAY_SECONDS
+        while not self._stopped:
+            await asyncio.sleep(delay)
+            if self._stopped:
+                return
+            client = self._client
+            if client is not None and client.is_connected():
+                return
+            _LOGGER.info(
+                "ECOVACS MQTT still disconnected; rebuilding with fresh credentials"
+            )
+            try:
+                await self._async_shutdown_client()
+                await self.start()
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:  # noqa: BLE001 - retry with backoff
+                _LOGGER.warning("ECOVACS MQTT reconnect failed: %s", err)
+                delay = min(delay * 2, RECONNECT_MAX_DELAY_SECONDS)
 
     def _on_connect(
         self,
@@ -104,6 +199,7 @@ class MowerMqttClient:
     ) -> None:
         if reason_code != 0:
             _LOGGER.warning("ECOVACS MQTT disconnected: %s", reason_code)
+            self._loop.call_soon_threadsafe(self._schedule_reconnect)
 
     def _on_paho_message(
         self,
@@ -177,9 +273,11 @@ class MowerAppPresenceMqttClient:
         )
         client.username_pw_set(_app_presence_username(self._device), credentials.token)
 
-        ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        ssl_context.check_hostname = False
-        ssl_context.verify_mode = ssl.CERT_NONE
+        host = f"jmq-ngiot-{self._api.continent}.dc.robotww.ecouser.net"
+        port = 443
+        ssl_context = await self._loop.run_in_executor(
+            None, _tls_context_for, host, port
+        )
         client.tls_set_context(ssl_context)
 
         client.on_connect = self._on_connect
@@ -187,8 +285,6 @@ class MowerAppPresenceMqttClient:
         client.on_message = self._on_message
         self._client = client
 
-        host = f"jmq-ngiot-{self._api.continent}.dc.robotww.ecouser.net"
-        port = 443
         _LOGGER.info(
             "Starting ECOVACS app-presence MQTT session host=%s client_id=%s",
             host,
@@ -221,7 +317,7 @@ class MowerAppPresenceMqttClient:
         started_at = self._started_at
         self._started_at = None
         await self._loop.run_in_executor(None, client.disconnect)
-        client.loop_stop()
+        await self._loop.run_in_executor(None, client.loop_stop)
         _LOGGER.info("Stopped ECOVACS app-presence MQTT session")
         self._capture_event(
             "app_presence_mqtt_stop",

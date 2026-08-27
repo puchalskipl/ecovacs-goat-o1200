@@ -6,8 +6,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 import json
 from pathlib import Path
+import queue
+import re
+import secrets
 import shutil
-from threading import Lock
+from threading import Lock, Thread
 import time
 from typing import Any
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -15,6 +18,13 @@ from zipfile import ZIP_DEFLATED, ZipFile
 DEFAULT_CAPTURE_DURATION_SECONDS = 30 * 60
 DEFAULT_CAPTURE_MAX_BYTES = 25 * 1024 * 1024
 DEFAULT_RETAINED_SESSIONS = 3
+# Session ids are generated internally as UTC timestamps (20260827T093825Z).
+# The export service accepts a session id from the caller, so it must never be
+# allowed to escape the capture directory (path traversal into e.g. .storage,
+# which would then be published under the unauthenticated /local/ path).
+SESSION_ID_PATTERN = re.compile(r"^[0-9]{8}T[0-9]{6}Z$")
+# Queue marker asking the writer thread to (re)build the sessions cache.
+RESCAN_SENTINEL = "__rescan__"
 REDACTED = "<redacted>"
 REDACT_KEYS = {
     "accessToken",
@@ -74,6 +84,21 @@ class DebugCaptureStore:
         self._default_max_duration_seconds = DEFAULT_CAPTURE_DURATION_SECONDS
         self._default_max_bytes = DEFAULT_CAPTURE_MAX_BYTES
         self._last_export: dict[str, str] | None = None
+        # Events are appended by a dedicated writer thread so callers (the HA
+        # event loop, the paho thread) never block on disk I/O. The queue item
+        # carries the enqueue-time timestamp.
+        self._event_queue: queue.SimpleQueue[tuple[str, str, dict[str, Any]]] = (
+            queue.SimpleQueue()
+        )
+        self._writer = Thread(
+            target=self._writer_loop, name="ecovacs-goat-capture", daemon=True
+        )
+        self._writer.start()
+        # Cached, cheap summary: sessions rebuilt from disk only when the set
+        # of sessions changes; the active session's byte count is tracked in
+        # memory. summary() is called from entity attributes on every update.
+        self._sessions_cache: list[dict[str, Any]] | None = None
+        self._active_bytes = 0
 
     def configure(
         self,
@@ -142,6 +167,8 @@ class DebugCaptureStore:
             )
             self._session = session
             self._event_path = session_path / "events.jsonl"
+            self._active_bytes = 0
+            self._sessions_cache = None
             self._write_manifest_locked(reason=reason)
             self._write_event_locked(
                 "capture_started",
@@ -170,6 +197,7 @@ class DebugCaptureStore:
             if self._export_path.exists():
                 shutil.rmtree(self._export_path)
             self._last_export = None
+            self._sessions_cache = None
             return self.summary()
 
     def mark(self, message: str) -> None:
@@ -177,7 +205,33 @@ class DebugCaptureStore:
         self.capture_event("marker", {"message": message})
 
     def capture_event(self, event_type: str, data: dict[str, Any] | None = None) -> None:
-        """Append a redacted event to the active capture session."""
+        """Queue a redacted event for the active capture session.
+
+        Non-blocking: the actual redaction and disk append happen on the
+        writer thread. Events queued while no session is active are dropped
+        by the writer.
+        """
+        if self._session is None:
+            return
+        self._event_queue.put((_utc_now(), event_type, data or {}))
+
+    def _writer_loop(self) -> None:
+        """Drain the event queue onto disk (dedicated thread)."""
+        while True:
+            timestamp, event_type, data = self._event_queue.get()
+            try:
+                if timestamp == RESCAN_SENTINEL:
+                    with self._lock:
+                        if self._sessions_cache is None:
+                            self._sessions_cache = self._scan_sessions()
+                    continue
+                self._write_queued_event(timestamp, event_type, data)
+            except Exception:  # noqa: BLE001 - diagnostics must never crash HA
+                continue
+
+    def _write_queued_event(
+        self, timestamp: str, event_type: str, data: dict[str, Any]
+    ) -> None:
         with self._lock:
             if self._session is None:
                 return
@@ -187,13 +241,39 @@ class DebugCaptureStore:
             if self._size_exceeded_locked():
                 self._stop_locked("max_size_exceeded")
                 return
-            self._write_event_locked(event_type, data or {})
+            self._write_event_locked(event_type, data, timestamp=timestamp)
             if self._size_exceeded_locked():
                 self._stop_locked("max_size_exceeded")
 
     def summary(self) -> dict[str, Any]:
-        """Return a small serialisable capture summary."""
-        sessions = []
+        """Return a small serialisable capture summary.
+
+        Entity attributes call this on every coordinator update, so the disk
+        scan is cached and rebuilt only when the set of sessions changed
+        (start/stop/clear); the active session's byte count comes from memory.
+        """
+        sessions = self._sessions_cache
+        if sessions is None:
+            # Cold cache (startup): the scan reads the disk, so hand it to the
+            # writer thread and return an empty list for this one render.
+            self._event_queue.put((RESCAN_SENTINEL, "", {}))
+            sessions = []
+        active = self._session.session_id if self._session else None
+        if active is not None:
+            sessions = [
+                {**entry, "bytes": self._active_bytes}
+                if entry["session_id"] == active
+                else entry
+                for entry in sessions
+            ]
+        return {
+            "active": active,
+            "sessions": sessions,
+            "last_export": self._last_export,
+        }
+
+    def _scan_sessions(self) -> list[dict[str, Any]]:
+        sessions: list[dict[str, Any]] = []
         if self._base_path.exists():
             for path in sorted(self._base_path.iterdir(), reverse=True):
                 if not path.is_dir():
@@ -209,11 +289,7 @@ class DebugCaptureStore:
                         "bytes": event_path.stat().st_size if event_path.exists() else 0,
                     }
                 )
-        return {
-            "active": self._session.session_id if self._session else None,
-            "sessions": sessions,
-            "last_export": self._last_export,
-        }
+        return sessions
 
     def recent_events(self, limit: int = 100) -> list[dict[str, Any]]:
         """Return recent events from the latest capture session."""
@@ -239,7 +315,13 @@ class DebugCaptureStore:
             raise FileNotFoundError("No ECOVACS debug capture sessions exist")
 
         self._export_path.mkdir(parents=True, exist_ok=True)
-        zip_path = self._export_path / f"{session.name}.zip"
+        # /local/ is served without authentication, so the file name carries a
+        # random token — a bare timestamp would be guessable.
+        for stale in self._export_path.glob(f"{session.name}-*.zip"):
+            stale.unlink(missing_ok=True)
+        zip_path = (
+            self._export_path / f"{session.name}-{secrets.token_urlsafe(12)}.zip"
+        )
         with ZipFile(zip_path, "w", compression=ZIP_DEFLATED) as archive:
             for path in sorted(session.iterdir()):
                 if path.is_file():
@@ -251,19 +333,23 @@ class DebugCaptureStore:
         }
         return self._last_export
 
-    def _write_event_locked(self, event_type: str, data: dict[str, Any]) -> None:
+    def _write_event_locked(
+        self, event_type: str, data: dict[str, Any], *, timestamp: str | None = None
+    ) -> None:
         assert self._session is not None
         assert self._event_path is not None
         event = {
-            "ts": _utc_now(),
+            "ts": timestamp or _utc_now(),
             "type": event_type,
             "data": self._redact(_json_safe(data)),
         }
         if not self._session.include_raw_payloads:
             event["data"] = _drop_raw_payloads(event["data"])
+        line = json.dumps(event, ensure_ascii=False, separators=(",", ":"))
         with self._event_path.open("a", encoding="utf-8") as file:
-            file.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")))
+            file.write(line)
             file.write("\n")
+        self._active_bytes += len(line.encode("utf-8")) + 1
 
     def _write_manifest_locked(self, *, reason: str | None) -> None:
         assert self._session is not None
@@ -290,6 +376,7 @@ class DebugCaptureStore:
         manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         self._session = None
         self._event_path = None
+        self._sessions_cache = None
 
     def _session_expired_locked(self) -> bool:
         assert self._session is not None
@@ -297,10 +384,10 @@ class DebugCaptureStore:
         return time.time() - started > self._session.max_duration_seconds
 
     def _size_exceeded_locked(self) -> bool:
-        if self._event_path is None or not self._event_path.exists():
+        if self._event_path is None:
             return False
         assert self._session is not None
-        return self._event_path.stat().st_size > self._session.max_bytes
+        return self._active_bytes > self._session.max_bytes
 
     def _cleanup_old_sessions_locked(self) -> None:
         if not self._base_path.exists():
@@ -316,9 +403,14 @@ class DebugCaptureStore:
         return sessions[-1] if sessions else None
 
     def _session_path(self, session_id: str | None) -> Path | None:
-        if not session_id:
+        if not session_id or not SESSION_ID_PATTERN.fullmatch(session_id):
             return None
-        path = self._base_path / session_id
+        path = (self._base_path / session_id).resolve()
+        base = self._base_path.resolve()
+        # Belt and braces: the pattern already forbids separators, but the
+        # containment check keeps this safe even if the pattern is relaxed.
+        if not path.is_relative_to(base):
+            return None
         return path if path.is_dir() else None
 
     def _redact(self, value: Any) -> Any:

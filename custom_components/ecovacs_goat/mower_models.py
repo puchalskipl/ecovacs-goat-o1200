@@ -12,9 +12,11 @@ POSITION_HISTORY_DENSE_TAIL_POINTS = 600
 # collapse whole lanes, so keep the trace attribute much denser than the G1
 # heading-gated trace needed.
 TRACE_ATTRIBUTE_POINTS = 1200
-OUTLINE_ATTRIBUTE_POINTS = 100
-OBSTACLE_ATTRIBUTE_POINTS = 24
-ZONE_ATTRIBUTE_POINTS = 160
+# The outline/obstacles arrive as chain codes and are simplified on decode
+# (collinear runs collapsed), so these caps only guard against pathological
+# shapes rather than trimming normal detail.
+OUTLINE_ATTRIBUTE_POINTS = 600
+OBSTACLE_ATTRIBUTE_POINTS = 80
 
 
 class MowerActivity(StrEnum):
@@ -309,6 +311,12 @@ class MowerMapInfo:
     chunks: dict[int, str] = field(default_factory=dict)
     outline: tuple[MapPosition, ...] = ()
     obstacles: tuple[tuple[MapPosition, ...], ...] = ()
+    # Where the outline came from: "mower" (its own stored map, exact) or
+    # "coverage" (traced from where it drove, a fallback approximation).
+    outline_source: str | None = None
+    # Map units per chain-code cell, derived from the mower's own payload
+    # so obstacles decode on the same grid as the outline.
+    chain_step: int | None = None
 
     @property
     def complete(self) -> bool:
@@ -325,6 +333,8 @@ class MowerMapInfo:
             "complete": self.complete,
             "chunk_count": len(self.chunks),
             "chunk_indexes": sorted(self.chunks),
+            "outline_source": self.outline_source,
+            "chain_step": self.chain_step,
             "outline": [
                 position.as_dict()
                 for position in _sample_positions(self.outline, OUTLINE_ATTRIBUTE_POINTS)
@@ -342,32 +352,6 @@ class MowerMapInfo:
 
 
 @dataclass(frozen=True)
-class MowerZone:
-    """A named mowing zone boundary (O-series ``onArI`` records).
-
-    ``boundary_code`` keeps the raw 8-direction chain code so the polygon can
-    be re-derived once the direction mapping / step size are fully calibrated.
-    """
-
-    zone_id: str
-    anchor: MapPosition
-    boundary_code: str = ""
-    polygon: tuple[MapPosition, ...] = ()
-
-    def as_dict(self) -> dict[str, Any]:
-        """Return a serialisable representation."""
-        return {
-            "zone_id": self.zone_id,
-            "anchor": self.anchor.as_dict(),
-            "boundary_code": self.boundary_code,
-            "polygon": [
-                position.as_dict()
-                for position in _sample_positions(self.polygon, ZONE_ATTRIBUTE_POINTS)
-            ],
-        }
-
-
-@dataclass(frozen=True)
 class MowerMap:
     """Live map data used by the Lovelace card."""
 
@@ -378,7 +362,6 @@ class MowerMap:
     rtk_station: MapPosition | None = None
     areas: tuple[MapPosition, ...] = ()
     no_go_zones: tuple[tuple[MapPosition, ...], ...] = ()
-    zones: tuple[MowerZone, ...] = ()
     position_history: tuple[MapPosition, ...] = ()
     info: MowerMapInfo = field(default_factory=MowerMapInfo)
     trace: MowerMapTrace = field(default_factory=MowerMapTrace)
@@ -399,7 +382,6 @@ class MowerMap:
             "no_go_zones": [
                 [position.as_dict() for position in zone] for zone in self.no_go_zones
             ],
-            "zones": [zone.as_dict() for zone in self.zones],
             "position_history": [
                 position.as_dict()
                 for position in _sample_positions(

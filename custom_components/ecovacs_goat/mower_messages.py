@@ -10,6 +10,12 @@ import lzma
 import re
 from typing import Any
 
+from .map_geometry import (
+    CHAIN_STEP,
+    OUTLINE_SOURCE_MOWER,
+    obstacles_from_area_info,
+    outline_from_map_info,
+)
 from .mower_models import (
     AreaParameter,
     MapPosition,
@@ -21,7 +27,6 @@ from .mower_models import (
     MowerSettings,
     MowerState,
     MowerStats,
-    MowerZone,
     NetworkInfo,
 )
 
@@ -63,22 +68,6 @@ _ACTIVE_MAP_ID_COMMANDS = {"getPos", "onPos", "getUWB", "onUWB"}
 
 # O-series live track (onMapTrack pushes): cap the accumulated mowed path.
 O_SERIES_TRACK_MAX_POINTS = 4000
-# O-series zone boundaries (onArI): 8-direction chain code decoding. Both the
-# direction mapping and the step size are provisional best-effort values until
-# calibrated against the official app map; the raw chain code is kept on every
-# zone so polygons can be re-derived without another capture.
-ZONE_CHAIN_STEP = 500
-ZONE_CHAIN_DIRECTIONS = {
-    1: (0, 1),
-    2: (1, 1),
-    3: (1, 0),
-    4: (1, -1),
-    5: (0, -1),
-    6: (-1, -1),
-    7: (-1, 0),
-    8: (-1, 1),
-}
-_ZONE_CHAIN_TOKEN = re.compile(r"(\d)(?:\((\d+)\))?")
 
 
 def decode_payload(payload: str | bytes | bytearray | dict[str, Any]) -> dict[str, Any]:
@@ -291,9 +280,9 @@ def apply_command_data(state: MowerState, command: str, data: Any) -> MowerState
                     # learn the map id like other O-series map replies.
                     state = replace(state, map=_map_mid_only(state.map, data))
         case "getArI" | "onArI":
-            # O-series zone boundaries: chain-coded polygons per mowing zone.
+            # O-series obstacle shapes (chain-coded polygons the mower learned).
             if isinstance(data, dict):
-                state = replace(state, map=_map_zones(state.map, data))
+                state = replace(state, map=_map_obstacles(state.map, data))
         case "getAreaParameter" | "onAreaParameter":
             # O-series per-zone mowing parameters (cutting height level, cut
             # mode, obstacle height, per-zone cut direction).
@@ -354,12 +343,13 @@ def apply_command_data(state: MowerState, command: str, data: Any) -> MowerState
             | "getMapInfo"
             | "onMapInfo"
         ):
-            # O-series (RTK) map dialect. The base-map / contour geometry for
-            # these is delivered over MQTT, not in the HTTP reply, so we only
-            # learn the map id here; the live marker comes from getPos/onPos
-            # (deebotPos + rtkPos).
+            # O-series (RTK) map dialect. The HTTP reply only acknowledges;
+            # the geometry arrives over MQTT. ``onMI`` carries the lawn
+            # outline (chain-coded) which the app fills as the lawn — while a
+            # job runs it may be an empty placeholder, so an empty decode
+            # never clears the stored outline.
             if isinstance(data, dict):
-                state = replace(state, map=_map_mid_only(state.map, data))
+                state = replace(state, map=_map_base_outline(state.map, data))
         case "getRTK" | "onRTK":
             # O-series RTK reference: the fixed base station position. There is
             # one station; show it where the G1 shows UWB beacons.
@@ -390,7 +380,9 @@ def apply_command_data(state: MowerState, command: str, data: Any) -> MowerState
                     left = _float(item.get("left"))
                     total = _float(item.get("total"))
                     if item.get("type") and left is not None and total and total > 0:
-                        lifespans[str(item["type"])] = round(left / total * 100, 2)
+                        # Store whole percent: 1% resolution is plenty for a
+                        # consumable, and decimals only clutter the history graph.
+                        lifespans[str(item["type"])] = round(left / total * 100)
                 state = replace(state, lifespans=lifespans)
         case "getRainDelay" | "onRainDelay":
             if isinstance(data, dict):
@@ -520,15 +512,27 @@ def apply_command_data(state: MowerState, command: str, data: Any) -> MowerState
             # a 21:00-08:00 window reports 0 at midday while the setting is on.
             # The settings themselves come from getAnimProtect and friends,
             # so this reply must not overwrite them.
+            # Pushes are partial: a reply carrying only some flags must not
+            # clear the others, otherwise an active protection flaps back to
+            # "nothing is blocking" every time such a payload arrives.
             if isinstance(data, dict):
+                current = state.protections
                 state = replace(
                     state,
                     protections=MowerProtections(
-                        animal_active=_bool(data.get("isAnimProtect")),
-                        rain_active=_bool(data.get("isRainProtect")),
-                        rain_delay_active=_bool(data.get("isRainDelay")),
-                        emergency_stop=_bool(data.get("isEStop")),
-                        locked=_bool(data.get("isLocked")),
+                        animal_active=_bool_or(
+                            data.get("isAnimProtect"), current.animal_active
+                        ),
+                        rain_active=_bool_or(
+                            data.get("isRainProtect"), current.rain_active
+                        ),
+                        rain_delay_active=_bool_or(
+                            data.get("isRainDelay"), current.rain_delay_active
+                        ),
+                        emergency_stop=_bool_or(
+                            data.get("isEStop"), current.emergency_stop
+                        ),
+                        locked=_bool_or(data.get("isLocked"), current.locked),
                     ),
                 )
         case "getRobotFeature" | "onRobotFeature":
@@ -964,65 +968,44 @@ def _map_track_push(current: MowerMap, data: dict[str, Any]) -> MowerMap:
     )
 
 
-def _map_zones(current: MowerMap, data: dict[str, Any]) -> MowerMap:
-    """Apply O-series zone boundaries (``onArI``) to the map.
+def _map_base_outline(current: MowerMap, data: dict[str, Any]) -> MowerMap:
+    """Apply the mower's lawn outline (``onMI``) and learn the map id.
 
-    The decoded blob is a list of records; zone entries are strings shaped
-    ``"<zone_id>;<anchor_x>,<anchor_y>;<chain code>"``.
+    The outline is the mower's own stored map — the shape the app fills in
+    green. Replies without geometry (acknowledgements, mid-job placeholders)
+    only update the map id.
+    """
+    new = _map_mid_only(current, data)
+    decoded = _decode_map_subset(data.get("info"))
+    # The payload also carries the bounding-box centre, which is what makes
+    # the grid scale derivable instead of assumed.
+    outline, chain_step = outline_from_map_info(decoded, data)
+    if not outline:
+        return new
+    return replace(
+        new,
+        info=replace(
+            new.info,
+            outline=outline,
+            outline_source=OUTLINE_SOURCE_MOWER,
+            chain_step=chain_step,
+        ),
+    )
+
+
+def _map_obstacles(current: MowerMap, data: dict[str, Any]) -> MowerMap:
+    """Apply the mower's learned obstacle shapes (``onArI``) to the map.
+
+    Obstacles are chain-coded polygons in the same coordinate frame as the
+    outline and positions — the app paints them as holes in the lawn.
     """
     decoded = _decode_map_subset(data.get("info"))
-    if not isinstance(decoded, list):
+    obstacles = obstacles_from_area_info(
+        decoded, step=current.info.chain_step or CHAIN_STEP
+    )
+    if not obstacles:
         return current
-
-    zones: list[MowerZone] = []
-    for record in decoded:
-        if not isinstance(record, list):
-            continue
-        for field in record:
-            if not isinstance(field, str) or field.count(";") < 2:
-                continue
-            zone_id, anchor_text, chain = field.split(";", 2)
-            if not zone_id.isdigit() or "," not in anchor_text:
-                continue
-            x_text, y_text, *_rest = anchor_text.split(",")
-            try:
-                anchor = MapPosition(x=int(x_text), y=int(y_text))
-            except ValueError:
-                continue
-            zones.append(
-                MowerZone(
-                    zone_id=zone_id,
-                    anchor=anchor,
-                    boundary_code=chain,
-                    polygon=_zone_polygon(anchor, chain),
-                )
-            )
-    if not zones:
-        return current
-    return replace(current, zones=tuple(zones))
-
-
-def _zone_polygon(anchor: MapPosition, chain: str) -> tuple[MapPosition, ...]:
-    """Decode an 8-direction chain-coded zone boundary (best-effort).
-
-    ``(n)`` suffixes repeat the preceding direction n extra times. Step size
-    and direction mapping are provisional (``ZONE_CHAIN_STEP`` /
-    ``ZONE_CHAIN_DIRECTIONS``) until calibrated against the app map.
-    """
-    x, y = anchor.x, anchor.y
-    points = [MapPosition(x=x, y=y)]
-    for match in _ZONE_CHAIN_TOKEN.finditer(chain):
-        direction = ZONE_CHAIN_DIRECTIONS.get(int(match.group(1)))
-        if direction is None:
-            continue
-        repeats = 1 + (int(match.group(2)) if match.group(2) else 0)
-        for _ in range(repeats):
-            x += direction[0] * ZONE_CHAIN_STEP
-            y += direction[1] * ZONE_CHAIN_STEP
-            points.append(MapPosition(x=x, y=y))
-    if len(points) < 3:
-        return ()
-    return tuple(points)
+    return replace(current, info=replace(current.info, obstacles=obstacles))
 
 
 def _area_parameters(value: Any) -> tuple[AreaParameter, ...]:
@@ -1213,6 +1196,12 @@ def _bool(value: Any) -> bool | None:
     return bool(int(value)) if isinstance(value, str | int | float) else bool(value)
 
 
+def _bool_or(value: Any, current: bool | None) -> bool | None:
+    """Return the payload's boolean, or keep the current one when absent."""
+    parsed = _bool(value)
+    return current if parsed is None else parsed
+
+
 def _int(value: Any) -> int | None:
     if value is None:
         return None
@@ -1226,15 +1215,17 @@ def _progress(
     data: dict[str, Any], mowed_area: int | None, job_area: int | None
 ) -> float | None:
     """Return current job mowing progress as a percentage."""
+    # Whole percent: the mower reports fractional progress several times a
+    # second, and the decimals only add noise to the state history.
     for key in ("progress", "cleanProgress", "mowingProgress", "percent", "percentage"):
         value = _float(data.get(key))
         if value is not None:
             if 0 <= value <= 1:
                 value *= 100
-            return round(max(0, min(100, value)), 1)
+            return float(round(max(0, min(100, value))))
     if mowed_area is None or job_area is None or job_area <= 0:
         return None
-    return round(max(0, min(100, mowed_area / job_area * 100)), 1)
+    return float(round(max(0, min(100, mowed_area / job_area * 100))))
 
 
 def merge_info_chunks(

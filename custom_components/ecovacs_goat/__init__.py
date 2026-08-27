@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from functools import partial
 from typing import Any
 
 import voluptuous as vol
@@ -108,10 +109,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: EcovacsConfigEntry) -> b
     controller = EcovacsController(hass, entry)
     await controller.initialize()
     entry.runtime_data = controller
+    entry.async_on_unload(entry.add_update_listener(_async_options_updated))
 
     _async_register_services(hass)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
+
+
+async def _async_options_updated(
+    hass: HomeAssistant, entry: EcovacsConfigEntry
+) -> None:
+    """Apply changed options without requiring an entry reload."""
+    entry.runtime_data.apply_options()
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: EcovacsConfigEntry) -> bool:
@@ -183,26 +192,30 @@ def _async_register_services(hass: HomeAssistant) -> None:
     async def async_start_debug_capture(call: ServiceCall) -> None:
         """Start debug captures for matching config entries."""
         for controller in _controllers_for_call(hass, call):
-            controller.debug_capture.start(
-                reason=call.data.get("reason"),
-                include_raw_payloads=call.data.get("include_raw_payloads"),
-                max_duration_seconds=call.data.get("duration_minutes", 0) * 60
-                if "duration_minutes" in call.data
-                else None,
-                max_bytes=call.data.get("max_size_mb", 0) * 1024 * 1024
-                if "max_size_mb" in call.data
-                else None,
+            # Session setup touches the filesystem — keep it off the loop.
+            await hass.async_add_executor_job(
+                partial(
+                    controller.debug_capture.start,
+                    reason=call.data.get("reason"),
+                    include_raw_payloads=call.data.get("include_raw_payloads"),
+                    max_duration_seconds=call.data.get("duration_minutes", 0) * 60
+                    if "duration_minutes" in call.data
+                    else None,
+                    max_bytes=call.data.get("max_size_mb", 0) * 1024 * 1024
+                    if "max_size_mb" in call.data
+                    else None,
+                )
             )
 
     async def async_stop_debug_capture(call: ServiceCall) -> None:
         """Stop debug captures for matching config entries."""
         for controller in _controllers_for_call(hass, call):
-            controller.debug_capture.stop()
+            await hass.async_add_executor_job(controller.debug_capture.stop)
 
     async def async_clear_debug_capture(call: ServiceCall) -> None:
         """Clear debug captures for matching config entries."""
         for controller in _controllers_for_call(hass, call):
-            controller.debug_capture.clear()
+            await hass.async_add_executor_job(controller.debug_capture.clear)
 
     async def async_mark_debug_capture(call: ServiceCall) -> None:
         """Add a marker to active debug captures."""
@@ -213,7 +226,9 @@ def _async_register_services(hass: HomeAssistant) -> None:
         """Export the latest debug capture as a local zip file."""
         try:
             exports = [
-                controller.debug_capture.export_zip(call.data.get("session_id"))
+                await hass.async_add_executor_job(
+                    controller.debug_capture.export_zip, call.data.get("session_id")
+                )
                 for controller in _controllers_for_call(hass, call)
             ]
         except FileNotFoundError as err:
@@ -258,15 +273,16 @@ def _controllers_for_call(
 ) -> list[EcovacsController]:
     """Return controllers matching an optional entity target."""
     entity_ids = set(call.data.get(ATTR_ENTITY_ID, []))
-    device_ids = _device_ids_for_entities(hass, entity_ids) if entity_ids else None
+    unique_ids = _unique_ids_for_entities(hass, entity_ids) if entity_ids else None
     controllers: list[EcovacsController] = []
 
     for config_entry in hass.config_entries.async_entries(DOMAIN):
         controller = getattr(config_entry, "runtime_data", None)
         if controller is None:
             continue
-        if device_ids is None or any(
-            coordinator.device.did in device_ids for coordinator in controller.coordinators
+        if unique_ids is None or any(
+            _coordinator_matches(coordinator, unique_ids)
+            for coordinator in controller.coordinators
         ):
             controllers.append(controller)
 
@@ -279,21 +295,31 @@ def _controllers_for_call(
 def _coordinators_for_call(hass: HomeAssistant, call: ServiceCall) -> list[Any]:
     """Return coordinators matching an optional entity target."""
     entity_ids = set(call.data.get(ATTR_ENTITY_ID, []))
-    device_ids = _device_ids_for_entities(hass, entity_ids) if entity_ids else None
+    unique_ids = _unique_ids_for_entities(hass, entity_ids) if entity_ids else None
     coordinators = []
 
     for controller in _controllers_for_call(hass, call):
         for coordinator in controller.coordinators:
-            if device_ids is None or coordinator.device.did in device_ids:
+            if unique_ids is None or _coordinator_matches(coordinator, unique_ids):
                 coordinators.append(coordinator)
 
     return coordinators
 
 
-def _device_ids_for_entities(hass: HomeAssistant, entity_ids: set[str]) -> set[str]:
-    """Resolve GOAT device ids from Home Assistant entity ids."""
+def _coordinator_matches(coordinator: Any, unique_ids: set[str]) -> bool:
+    """Return whether any targeted entity belongs to this coordinator.
+
+    Unique ids are ``<did>_<key>``; dids may themselves contain underscores,
+    so match by prefix instead of splitting on the first underscore.
+    """
+    prefix = f"{coordinator.device.did}_"
+    return any(unique_id.startswith(prefix) for unique_id in unique_ids)
+
+
+def _unique_ids_for_entities(hass: HomeAssistant, entity_ids: set[str]) -> set[str]:
+    """Resolve registry unique ids from Home Assistant entity ids."""
     registry = er.async_get(hass)
-    device_ids: set[str] = set()
+    unique_ids: set[str] = set()
     invalid_entity_ids: list[str] = []
 
     for entity_id in entity_ids:
@@ -305,7 +331,7 @@ def _device_ids_for_entities(hass: HomeAssistant, entity_ids: set[str]) -> set[s
         ):
             invalid_entity_ids.append(entity_id)
             continue
-        device_ids.add(entity_entry.unique_id.split("_", 1)[0])
+        unique_ids.add(entity_entry.unique_id)
 
     if invalid_entity_ids:
         raise HomeAssistantError(
@@ -313,4 +339,4 @@ def _device_ids_for_entities(hass: HomeAssistant, entity_ids: set[str]) -> set[s
             + ", ".join(sorted(invalid_entity_ids))
         )
 
-    return device_ids
+    return unique_ids

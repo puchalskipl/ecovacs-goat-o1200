@@ -135,10 +135,15 @@ class EcovacsController:
                 _LOGGER.info("Initialized ECOVACS mower %s", device.name)
             self._coordinators = started
         except DeviceVerificationRequiredError as ex:
+            # Coordinators already started for earlier devices must be torn
+            # down here too — a failed setup never gets an unload call, so
+            # anything left running (paho thread, tasks) leaks until restart.
+            await self._stop_coordinators(started)
             raise ConfigEntryAuthFailed(
                 "ECOVACS device verification required"
             ) from ex
         except EcovacsAuthError as ex:
+            await self._stop_coordinators(started)
             raise ConfigEntryAuthFailed("Invalid ECOVACS credentials") from ex
         except ConfigEntryNotReady:
             await self._stop_coordinators(started)
@@ -219,6 +224,14 @@ class EcovacsController:
         return bool(
             self._entry.options.get(OPTION_AUTO_LIVE_MAP, DEFAULT_AUTO_LIVE_MAP)
         )
+
+    def apply_options(self) -> None:
+        """Re-apply config entry options after they changed in the UI.
+
+        auto_live_map is read live via a callback; the debug-capture defaults
+        are pushed into the store here so an entry reload is not required.
+        """
+        self._configure_debug_capture(self._entry.options)
 
     def _configure_debug_capture(self, options: Mapping[str, Any]) -> None:
         """Apply capture defaults from config entry options."""

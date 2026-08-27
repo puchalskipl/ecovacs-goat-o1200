@@ -500,7 +500,11 @@ class EcovacsMowerApi:
         auth_code = await self._auth_code(access_token, user_id)
         token_resp = await self._login_by_it_token(user_id, auth_code)
         portal_user_id = str(token_resp["userId"])
-        expires_at = time.time() + int(token_resp.get("last", 604800)) / 1000 * 0.99
+        # "last" is the token lifetime in milliseconds; the fallback must use
+        # the same unit (7 days), otherwise a missing field would shrink the
+        # lifetime to ~10 minutes and force constant re-logins.
+        lifetime_seconds = int(token_resp.get("last", 604_800_000)) / 1000
+        expires_at = time.time() + max(600.0, lifetime_seconds * 0.99)
         return Credentials(
             user_id=portal_user_id,
             token=token_resp["token"],
@@ -592,9 +596,16 @@ class EcovacsMowerApi:
         secret: str,
     ) -> dict[str, Any]:
         signed = sign_params(params, extra, key, secret)
-        async with self._session.get(url, params=signed, timeout=TIMEOUT) as response:
-            response.raise_for_status()
-            result: dict[str, Any] = await response.json(content_type=None)
+        try:
+            async with self._session.get(
+                url, params=signed, timeout=TIMEOUT
+            ) as response:
+                response.raise_for_status()
+                result: dict[str, Any] = await response.json(content_type=None)
+        except (ClientError, TimeoutError) as err:
+            # Network failures must surface as EcovacsApiError so callers'
+            # retry loops (position refresh, readback) survive them.
+            raise EcovacsApiError(f"auth GET failed: {err!r}") from err
         if result.get("code") == "0000":
             return result["data"]
         message = str(result.get("msg") or "")
@@ -631,8 +642,8 @@ class EcovacsMowerApi:
                 response.raise_for_status()
                 result: dict[str, Any] = await response.json(content_type=None)
                 return result
-        except ClientResponseError as err:
-            raise EcovacsApiError(f"POST {path} failed") from err
+        except (ClientError, TimeoutError) as err:
+            raise EcovacsApiError(f"POST {path} failed: {err!r}") from err
 
     async def _encrypt_account(self, account: str) -> str:
         public_key = await self._get_public_key()
