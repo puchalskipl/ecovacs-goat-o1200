@@ -8,8 +8,6 @@ card with mower controls. The integration domain is **`ecovacs_goat`**.
 
 It gives you a lawn mower entity, useful sensors, mower settings, and an optional dashboard card with the map and start / stop / dock / edge-trim controls.
 
-![Ecovacs GOAT card screenshot](docs/images/ecovacs-goat-card.png)
-
 ## Important
 
 This is an unofficial community project. It is not affiliated with, endorsed by, certified by, or supported by ECOVACS.
