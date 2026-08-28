@@ -47,7 +47,10 @@ CHAIN_DIRECTIONS = {
     7: (-1, -1),
     8: (-1, 0),
 }
-# A digit optionally followed by "(n)", meaning n extra repeats.
+# A digit optionally followed by "(n)", meaning the step repeats n times in
+# TOTAL (not n extra times). Verified two ways on a live capture: only this
+# reading closes the outline loop (gap of one cell instead of 17), and only
+# it makes the payload's own centre yield the same scale on both axes.
 CHAIN_TOKEN = re.compile(r"(\d)(?:\((\d+)\))?")
 # onArI layer holding obstacle shapes.
 OBSTACLE_LAYER = "3"
@@ -73,7 +76,7 @@ def walk_chain_cells(chain: str) -> list[tuple[int, int]]:
         direction = CHAIN_DIRECTIONS.get(int(match.group(1)))
         if direction is None:
             continue
-        repeats = 1 + (int(match.group(2)) if match.group(2) else 0)
+        repeats = int(match.group(2)) if match.group(2) else 1
         for _ in range(repeats):
             x += direction[0]
             y += direction[1]
@@ -126,9 +129,10 @@ def decode_chain_shape(
 ) -> tuple[MapPosition, ...]:
     """Return the polygon described by an anchor plus an 8-direction chain code.
 
-    The chain code emits one point per cell, so long straight edges arrive as
-    hundreds of collinear points; they are collapsed to their end points,
-    which keeps the shape identical while making it cheap to ship and draw.
+    ``d(n)`` repeats the step n times in total. The chain emits one point per
+    cell, so long straight edges arrive as hundreds of collinear points; they
+    are collapsed to their end points, which keeps the shape identical while
+    making it cheap to ship and draw.
     """
     return _points_from_cells(walk_chain_cells(chain), anchor, step)
 
@@ -239,6 +243,65 @@ def obstacles_from_area_info(
             if len(points) >= MIN_SHAPE_POINTS:
                 shapes.append(points)
     return tuple(shapes)
+
+
+def parse_track_record(field: Any, *, step: int = CHAIN_STEP) -> tuple[str, tuple[tuple[MapPosition, ...], ...]] | None:
+    """Parse one ``onMapTrack`` field into a lane id and its segments.
+
+    The mower plans a job as numbered lanes and reports **what is still left
+    to cut** on each of them, re-sending a lane every couple of seconds as it
+    shrinks. That is the layer the app draws as hatching over the lawn, which
+    disappears piece by piece as the mower works — not a trail of where it has
+    been.
+
+    Two field shapes exist, told apart by the second token:
+
+    * ``"1;1;<id>;x,y;x,y[;x,y;x,y...]"`` — straight lanes, coordinates in
+      **pairs**: each pair is one segment, and a lane split by an obstacle
+      simply carries several pairs.
+    * ``"1;2;<id>;x,y;<chain code>"`` — a chain-coded shape, used for the
+      border lap that follows the lawn edge.
+
+    A field with an id but no coordinates means that lane is finished.
+    Returns ``(lane_id, segments)`` with an empty tuple for a finished lane,
+    or None when the field is not a lane record.
+    """
+    if not isinstance(field, str):
+        return None
+    parts = field.split(";")
+    if len(parts) < 3:
+        return None
+    subtype, lane_id, rest = parts[1], parts[2], parts[3:]
+    if not rest:
+        return lane_id, ()
+
+    if subtype == "2":
+        anchor_text, *chain_parts = rest
+        if "," not in anchor_text or not chain_parts:
+            return lane_id, ()
+        x_text, y_text, *_ = anchor_text.split(",")
+        try:
+            anchor = MapPosition(x=int(x_text), y=int(y_text))
+        except ValueError:
+            return None
+        shape = decode_chain_shape(anchor, chain_parts[0], step=step)
+        return lane_id, ((shape,) if len(shape) >= 2 else ())
+
+    points: list[MapPosition] = []
+    for token in rest:
+        if "," not in token:
+            continue
+        x_text, y_text, *_ = token.split(",")
+        try:
+            points.append(MapPosition(x=int(x_text), y=int(y_text)))
+        except ValueError:
+            continue
+    # Coordinates come in pairs; an odd trailing point has no partner and is
+    # dropped rather than joined to the previous segment.
+    segments = tuple(
+        (points[i], points[i + 1]) for i in range(0, len(points) - 1, 2)
+    )
+    return lane_id, segments
 
 
 def stabilise_geometry(

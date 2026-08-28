@@ -13,6 +13,7 @@ from typing import Any
 from .map_geometry import (
     CHAIN_STEP,
     OUTLINE_SOURCE_MOWER,
+    parse_track_record,
     obstacles_from_area_info,
     outline_from_map_info,
 )
@@ -66,8 +67,9 @@ POSITION_HISTORY_ACTIVITIES = {
 # merely contribute geometry for whichever map is already active.
 _ACTIVE_MAP_ID_COMMANDS = {"getPos", "onPos", "getUWB", "onUWB"}
 
-# O-series live track (onMapTrack pushes): cap the accumulated mowed path.
-O_SERIES_TRACK_MAX_POINTS = 4000
+# onMapTrack record kinds: a full snapshot of the remaining plan, versus an
+# update touching individual lanes (see _map_track_push).
+TRACK_SNAPSHOT = "1"
 
 
 def decode_payload(payload: str | bytes | bytearray | dict[str, Any]) -> dict[str, Any]:
@@ -182,6 +184,7 @@ def apply_command_data(state: MowerState, command: str, data: Any) -> MowerState
                     state,
                     activity=activity,
                     clean_type=_clean_content_type(data),
+                    clean_trigger=_clean_trigger(data, state.clean_trigger),
                     charging=False if activity is MowerActivity.MOWING else state.charging,
                     task_id=_task_id(data, state.task_id),
                     map=mower_map,
@@ -588,6 +591,22 @@ def _clean_content_type(data: dict[str, Any]) -> str | None:
     return str(value) if value else None
 
 
+def _clean_trigger(data: dict[str, Any], current: str | None) -> str | None:
+    """Return why the job is in its current state, or None once it is over.
+
+    The mower reports ``trigger`` alongside the clean state: "lowBattery"
+    when it parks to recharge mid-job, "continue" when it picks the job back
+    up, "workComplete" when it is done. Pushes that carry no trigger keep the
+    last one, because the reason outlives the individual message.
+    """
+    value = data.get("trigger")
+    if value:
+        return str(value)
+    if data.get("state") == "idle":
+        return None
+    return current
+
+
 def _task_id(data: dict[str, Any], current: str | None) -> str | None:
     """Return the best current mowing task id found in app payloads.
 
@@ -909,64 +928,59 @@ def _decode_map_subset(value: Any) -> Any:
 
 
 def _map_track_push(current: MowerMap, data: dict[str, Any]) -> MowerMap:
-    """Accumulate an O-series live track push into the trace path.
+    """Apply an O-series ``onMapTrack`` push: what the mower still has to cut.
 
-    Each ``onMapTrack`` push carries a small LZMA window of recently mowed
-    coordinates (records like ``["1", "2", "1;1;74;x,y;x,y;..."]`` where the
-    leading semicolon tokens are header fields). The union of all pushes is the
-    session's mowed path — the same layer the official app paints as "mowed".
+    Pushes come in two kinds, told apart by the record's second token:
+
+    * ``"1"`` — a **full snapshot** of the remaining plan (70+ lanes). It is
+      authoritative: lanes missing from it are finished, which is how the
+      mower retires them (it does not report them empty).
+    * ``"2"`` — an **update** to individual lanes as they shrink, or a lane
+      with no coordinates meaning that one is done.
+
+    This is the layer the official app hatches over the lawn and rubs out
+    piece by piece; it is not a record of where the mower has driven.
     """
     decoded = _decode_map_subset(data.get("info"))
     if not isinstance(decoded, list):
         return current
 
-    new_points: list[MapPosition] = []
+    step = current.info.chain_step or CHAIN_STEP
+    lanes = dict(current.trace.lanes)
+    touched = False
     for record in decoded:
-        if not isinstance(record, list):
+        if not isinstance(record, list) or len(record) < 2:
             continue
-        coordinates = next(
-            (
-                field
-                for field in record
-                if isinstance(field, str) and ";" in field and "," in field
-            ),
-            None,
-        )
-        if coordinates is None:
-            continue
-        for token in coordinates.split(";"):
-            if "," not in token:
+        snapshot = record[1] == TRACK_SNAPSHOT
+        seen: dict[str, tuple[tuple[MapPosition, ...], ...]] = {}
+        for field in record[2:]:
+            parsed = parse_track_record(field, step=step)
+            if parsed is None:
                 continue
-            x_text, y_text, *_rest = token.split(",")
-            try:
-                new_points.append(MapPosition(x=int(x_text), y=int(y_text)))
-            except ValueError:
-                continue
-    if not new_points:
+            lane_id, segments = parsed
+            touched = True
+            if segments:
+                seen[lane_id] = segments
+            else:
+                lanes.pop(lane_id, None)
+        if snapshot and seen:
+            # Authoritative: whatever is not in the snapshot is already cut.
+            lanes = seen
+        else:
+            lanes.update(seen)
+    if not touched:
         return current
-
-    seen = {(position.x, position.y) for position in current.trace.path}
-    appended = list(current.trace.path)
-    for position in new_points:
-        key = (position.x, position.y)
-        if key in seen:
-            continue
-        seen.add(key)
-        appended.append(position)
-    if len(appended) > O_SERIES_TRACK_MAX_POINTS:
-        appended = appended[-O_SERIES_TRACK_MAX_POINTS:]
 
     return replace(
         current,
         trace=replace(
             current.trace,
-            batch_id=str(data["batid"]) if data.get("batid") is not None else current.trace.batch_id,
-            serial=str(data["serial"]) if data.get("serial") is not None else current.trace.serial,
-            info_size=_int(data.get("infoSize")),
-            path=tuple(appended),
+            lanes=lanes,
+            batch_id=data.get("batid") or current.trace.batch_id,
+            serial=str(data.get("serial")) if data.get("serial") else current.trace.serial,
+            info_size=_int(data.get("infoSize")) or current.trace.info_size,
         ),
     )
-
 
 def _map_base_outline(current: MowerMap, data: dict[str, Any]) -> MowerMap:
     """Apply the mower's lawn outline (``onMI``) and learn the map id.

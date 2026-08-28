@@ -115,6 +115,8 @@ SENSORS: tuple[MowerSensorDescription, ...] = (
             state.map.current_position
             or state.map.trace.chunks
             or state.map.trace.path
+            or state.map.trace.lanes
+            or state.map.info.outline
             or state.map.position_history
             or state.map.info.obstacles
         )

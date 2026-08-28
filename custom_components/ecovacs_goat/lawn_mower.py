@@ -17,6 +17,11 @@ from .mower_models import MowerActivity
 
 STATE_IDLE = "idle"
 
+# Triggers that mean the mower parked itself mid-job and will carry on
+# without anyone touching it: it stopped to recharge, or it is already
+# picking the job back up.
+RESUMING_TRIGGERS = frozenset({"lowBattery", "continue"})
+
 ACTIVITY_MAP = {
     MowerActivity.IDLE: STATE_IDLE,
     MowerActivity.MOWING: LawnMowerActivity.MOWING,
@@ -60,9 +65,29 @@ class EcovacsMower(EcovacsMowerEntity, LawnMowerEntity):
         return ACTIVITY_MAP[self.coordinator.data.activity]
 
     @property
-    def extra_state_attributes(self) -> dict[str, str | None]:
-        """Expose the active job type (auto mow vs edge trimming)."""
-        return {"work_mode": self.coordinator.data.clean_type}
+    def extra_state_attributes(self) -> dict[str, str | bool | None]:
+        """Expose the active job, why it is in this state, and whether it resumes.
+
+        A mower parked mid-job to recharge reports the same "paused" activity
+        as one a person paused, so ``pause_reason`` carries the mower's own
+        ``trigger``, ``resumes_automatically`` answers the question a dashboard
+        actually wants (will this carry on by itself?), and ``charging`` says
+        whether it is actually drawing charge.
+        """
+        data = self.coordinator.data
+        trigger = data.clean_trigger
+        return {
+            "work_mode": data.clean_type,
+            # Reported by the mower rather than guessed from "docked and not
+            # full": a mower can sit on the dock without drawing charge.
+            "charging": data.charging,
+            "pause_reason": trigger if data.activity is MowerActivity.PAUSED else None,
+            "resumes_automatically": (
+                trigger in RESUMING_TRIGGERS
+                if data.activity is MowerActivity.PAUSED
+                else None
+            ),
+        }
 
     async def async_start_mowing(self) -> None:
         """Start or resume mowing."""

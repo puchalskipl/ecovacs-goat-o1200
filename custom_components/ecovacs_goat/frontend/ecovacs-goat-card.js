@@ -25,9 +25,6 @@ const DEFAULT_CONFIG = {
   stop_button: "button.mower_end_mowing",
   trim_button: "button.mower_start_edge_trimming",
   name: "Mower",
-  // Break the live trail into segments when consecutive points are further
-  // apart than this (map units); gaps come from slow-poll fallback, not travel.
-  trail_gap_limit: 500,
   // Cap the rendered map height (CSS px). The SVG scales with the card
   // width, so in a wide dashboard column an uncapped map fills the screen
   // and pushes the action buttons below the fold.
@@ -298,43 +295,33 @@ const STYLE = `
     color: var(--secondary-text-color);
     text-align: center;
   }
-  .map-trail {
+  /* What is still to be cut: the mower's own remaining lanes, drawn as the
+     app draws them — hatching over the lawn that is rubbed out lane by lane.
+     Clipped to the lawn so a lane that overhangs the border stays inside. */
+  .map-pending {
     fill: none;
-    stroke: #b9ee98;
-    stroke-width: 3;
-    stroke-linecap: round;
-    stroke-linejoin: round;
-    opacity: 0.55;
-  }
-  .map-mowed-trail {
-    fill: none;
-    stroke: #b9ee98;
-    stroke-width: 5;
-    stroke-linecap: round;
-    stroke-linejoin: round;
+    stroke: #4b9a33;
+    stroke-width: 0.8;
+    stroke-linecap: butt;
     opacity: 0.5;
   }
-  /* The lawn is one path: the outline plus every obstacle as a subpath, so
-     evenodd punches the obstacles out as holes (what the app shows). */
+  /* The lawn: outline filled, obstacles punched out as holes by evenodd. */
   .map-lawn {
-    fill: #8fd14f;
-    stroke: #ffffff;
-    stroke-width: 2;
-    stroke-linejoin: round;
+    fill: #b7e394;
+    stroke: none;
   }
   .map-lawn-outline {
     fill: none;
-    stroke: #4f9a43;
-    stroke-width: 1.5;
+    stroke: #3e8e28;
+    stroke-width: 3;
     stroke-linejoin: round;
-    opacity: 0.65;
   }
   .map-obstacle-edge {
-    fill: none;
-    stroke: #6b7f8c;
-    stroke-width: 1.5;
+    fill: #6f9c4e;
+    stroke: #4b7a35;
+    stroke-width: 1;
     stroke-linejoin: round;
-    opacity: 0.75;
+    opacity: 0.9;
   }
   .map-station {
     fill: #263847;
@@ -357,10 +344,16 @@ const STYLE = `
     stroke-width: 1.5;
     stroke-dasharray: 4 3;
   }
-  .map-mower {
-    fill: #2196f3;
-    stroke: #fff;
+  /* Mower marker shaped like the app's: a rounded body with a lighter dot
+     showing which way it faces, rather than a bare arrowhead. */
+  .map-mower-body {
+    fill: #1f3d57;
+    stroke: #ffffff;
     stroke-width: 2;
+  }
+  .map-mower-eye {
+    fill: #ffffff;
+    opacity: 0.9;
   }
   .actions {
     display: grid;
@@ -670,7 +663,7 @@ class EcovacsGoatCard extends HTMLElement {
     }
     const mower = this._state(this.config.entity);
     // The map must follow the REAL mower state, not the optimistic one: an
-    // optimistic "mowing" after a failed start would wipe the sticky trail
+    // optimistic "mowing" after a failed start would wipe the pending lanes
     // before the mower ever moved.
     const mowerState = mower?.state || "unavailable";
     const mapState = this._state(this.config.map_entity);
@@ -685,7 +678,7 @@ class EcovacsGoatCard extends HTMLElement {
 
     const render = this._computeMapRender(resolved, mowerState);
     const svg = slot.querySelector("svg");
-    // When only the dynamic layers changed (trail, mowed area, mower marker)
+    // When only the dynamic layers changed (pending lanes, mower marker)
     // patch them in place instead of rebuilding the whole SVG. Tearing down
     // and recreating the SVG (and its background) on every frame is what
     // causes the visible flicker while mowing.
@@ -974,9 +967,9 @@ class EcovacsGoatCard extends HTMLElement {
   _resolveMapData(mapState, mowerState) {
     const model = this._mapModel || (this._mapModel = {});
 
-    // Drop the previous run's trail and mowed area the moment a fresh mow
+    // Drop the previous run's lanes the moment a fresh mow
     // starts. "Fresh" means entering `mowing` from a non-mowing, non-paused
-    // state, so resuming from a pause keeps the existing trail.
+    // state, so resuming from a pause keeps the existing plan.
     const previousMowerState = this._mapMowerState;
     this._mapMowerState = mowerState;
     if (
@@ -986,7 +979,7 @@ class EcovacsGoatCard extends HTMLElement {
       previousMowerState !== "paused"
     ) {
       delete model.position_history;
-      delete model.tracePath;
+      delete model.pending;
     }
 
     const hasAttributes =
@@ -1009,7 +1002,7 @@ class EcovacsGoatCard extends HTMLElement {
       keep("outline", liveInfo.outline);
       keep("obstacles", liveInfo.obstacles);
       keep("position_history", map.position_history);
-      keep("tracePath", map.trace?.path);
+      keep("pending", map.trace?.pending);
       keep("current_position", map.current_position);
       keep("charge_positions", map.charge_positions);
       keep("uwb_positions", map.uwb_positions);
@@ -1028,7 +1021,7 @@ class EcovacsGoatCard extends HTMLElement {
         model.no_go_zones?.length ||
         model.zones?.length ||
         model.position_history?.length ||
-        model.tracePath?.length ||
+        model.pending?.length ||
         model.current_position ||
         model.rtk_station
     );
@@ -1038,7 +1031,7 @@ class EcovacsGoatCard extends HTMLElement {
       outline: model.outline,
       obstacles: model.obstacles,
       position_history: model.position_history,
-      tracePath: model.tracePath,
+      pending: model.pending,
       current_position: model.current_position,
       charge_positions: model.charge_positions,
       uwb_positions: model.uwb_positions,
@@ -1052,7 +1045,7 @@ class EcovacsGoatCard extends HTMLElement {
   // Cheap fingerprint of the resolved map inputs. Used to skip rendering
   // entirely when an unrelated `set hass` update arrives. This runs on EVERY
   // hass update in HA, so it must stay O(1): array lengths plus the last
-  // point stand in for full contents (the trail/history only ever append,
+  // point stand in for full contents (the history only ever appends,
   // and a same-length change always moves the newest point).
   _mapDataSignature(resolved, mowerState) {
     if (!resolved || !resolved.available) {
@@ -1070,7 +1063,7 @@ class EcovacsGoatCard extends HTMLElement {
       arraySig(resolved.outline),
       arraySig(resolved.obstacles),
       arraySig(resolved.position_history),
-      arraySig(resolved.tracePath),
+      resolved.pending?.length ?? 0,
       JSON.stringify(resolved.current_position ?? null),
       arraySig(resolved.charge_positions),
       arraySig(resolved.uwb_positions),
@@ -1088,9 +1081,15 @@ class EcovacsGoatCard extends HTMLElement {
 
     const garden = this._positions(resolved.outline);
     const obstacles = this._polygons(resolved.obstacles);
-    const livePath = this._positions(resolved.position_history);
-    const tracePath = this._positions(resolved.tracePath);
-    const mowedArea = tracePath;
+    // Each pending lane is its own segment: joining them would draw lines
+    // across whatever lies between two lanes (a terrace, the house).
+    const pending = (resolved.pending || [])
+      .map((segment) => this._positions(segment))
+      .filter((segment) => segment.length > 1);
+    // Not drawn any more (the app shows no trail either), but the recent
+    // positions still tell us which way the mower is pointing when its own
+    // heading is missing.
+    const recentPositions = this._positions(resolved.position_history);
     const charge = this._positions(resolved.charge_positions);
     const rawCurrent = this._position(resolved.current_position);
     const current = this._displayMowerPosition({
@@ -1105,8 +1104,8 @@ class EcovacsGoatCard extends HTMLElement {
     const points = [
       ...garden,
       ...obstacles.flat(),
-      ...mowedArea,
-      ...livePath,
+      ...pending.flat(),
+      ...recentPositions,
       ...(current ? [current] : []),
       ...charge,
       ...beacons,
@@ -1129,11 +1128,21 @@ class EcovacsGoatCard extends HTMLElement {
     const obstaclePaths = obstacles
       .map((obstacle) => this._closedPath(obstacle, bounds, width, height))
       .filter(Boolean);
+    const lawnClipId = `egc-lawn-clip-${this._instanceId}`;
     const gardenMarkup = gardenPath
-      ? `<path class="map-lawn" fill-rule="evenodd" d="${
+      ? `<clipPath id="${lawnClipId}"><path clip-rule="evenodd" d="${
           gardenPath + obstaclePaths.join("")
-        }"></path><path class="map-lawn-outline" d="${gardenPath}"></path>`
+        }"></path></clipPath><path class="map-lawn" fill-rule="evenodd" d="${
+          gardenPath + obstaclePaths.join("")
+        }"></path>`
       : "";
+    // The border is drawn above the mowed lanes, like the app: lanes are
+    // clipped at the boundary, so without this the dark line all but vanishes
+    // once the edge pass paints over it.
+    const lawnBorderMarkup = gardenPath
+      ? `<path class="map-lawn-outline" d="${gardenPath}"></path>`
+      : "";
+    const laneClip = gardenPath ? ` clip-path="url(#${lawnClipId})"` : "";
     const obstacleMarkup = obstaclePaths
       .map((path) => `<path class="map-obstacle-edge" d="${path}"></path>`)
       .join("");
@@ -1164,11 +1173,19 @@ class EcovacsGoatCard extends HTMLElement {
       : "";
 
     // Dynamic layers: change on (almost) every position update.
-    const mowedAreaPath = this._trailPath(mowedArea, bounds, width, height);
-    const liveSvgPath = this._trailPath(livePath, bounds, width, height);
+    const pendingPath = pending
+      .map((segment) =>
+        segment
+          .map((position, index) => {
+            const point = this._project(position, bounds, width, height);
+            return `${index ? "L" : "M"} ${point.x} ${point.y}`;
+          })
+          .join(" ")
+      )
+      .join(" ");
     const currentPoint = current ? this._project(current, bounds, width, height) : null;
     const currentHeading = current
-      ? this._mowerHeading(current, charge, livePath, mowerState)
+      ? this._mowerHeading(current, charge, recentPositions, mowerState)
       : 0;
     const markerAnimation = this._mowerMarkerAnimation(
       current,
@@ -1178,13 +1195,14 @@ class EcovacsGoatCard extends HTMLElement {
       height
     );
     const mowerMarkup = currentPoint
-      ? `<g class="map-mower-group" transform="translate(${currentPoint.x} ${currentPoint.y})">${markerAnimation}<g class="map-mower-rotate" transform="rotate(${currentHeading})"><path class="map-mower" d="M 13 0 L -9 -8 L -5 0 L -9 8 Z"></path></g></g>`
+      ? `<g class="map-mower-group" transform="translate(${currentPoint.x} ${currentPoint.y})">${markerAnimation}<g class="map-mower-rotate" transform="rotate(${currentHeading})"><rect class="map-mower-body" x="-9" y="-7" width="18" height="14" rx="5"></rect><circle class="map-mower-eye" cx="2" cy="0" r="2.6"></circle></g></g>`
       : "";
 
     const structureSignature = JSON.stringify([
       width,
       height,
       gardenMarkup,
+      lawnBorderMarkup,
       obstacleMarkup,
       stationMarkup,
       noGoMarkup,
@@ -1196,13 +1214,14 @@ class EcovacsGoatCard extends HTMLElement {
       width,
       height,
       gardenMarkup,
+      lawnBorderMarkup,
       obstacleMarkup,
       stationMarkup,
       noGoMarkup,
       beaconMarkup,
       rtkMarkup,
-      mowedAreaPath,
-      liveSvgPath,
+      pendingPath,
+      laneClip,
       currentPoint,
       currentHeading,
       markerAnimation,
@@ -1216,8 +1235,8 @@ class EcovacsGoatCard extends HTMLElement {
       <svg viewBox="0 0 ${render.width} ${render.height}" role="img" aria-label="Live mower map">
         ${render.gardenMarkup}
         ${render.obstacleMarkup}
-        <path class="map-mowed-trail" data-layer="mowed"${render.mowedAreaPath ? ` d="${render.mowedAreaPath}"` : ""}></path>
-        <path class="map-trail"${render.liveSvgPath ? ` d="${render.liveSvgPath}"` : ""}></path>
+        <path class="map-pending" data-layer="pending"${render.laneClip}${render.pendingPath ? ` d="${render.pendingPath}"` : ""}></path>
+        ${render.lawnBorderMarkup}
         ${render.stationMarkup}
         ${render.noGoMarkup}
         ${render.beaconMarkup}
@@ -1235,21 +1254,12 @@ class EcovacsGoatCard extends HTMLElement {
       return false;
     }
 
-    const mowed = svg.querySelector('[data-layer="mowed"]');
-    if (mowed) {
-      if (render.mowedAreaPath) {
-        mowed.setAttribute("d", render.mowedAreaPath);
+    const pending = svg.querySelector('[data-layer="pending"]');
+    if (pending) {
+      if (render.pendingPath) {
+        pending.setAttribute("d", render.pendingPath);
       } else {
-        mowed.removeAttribute("d");
-      }
-    }
-
-    const trail = svg.querySelector(".map-trail");
-    if (trail) {
-      if (render.liveSvgPath) {
-        trail.setAttribute("d", render.liveSvgPath);
-      } else {
-        trail.removeAttribute("d");
+        pending.removeAttribute("d");
       }
     }
 
@@ -1258,7 +1268,7 @@ class EcovacsGoatCard extends HTMLElement {
         "transform",
         `translate(${render.currentPoint.x} ${render.currentPoint.y})`
       );
-      group.innerHTML = `${render.markerAnimation}<g class="map-mower-rotate" transform="rotate(${render.currentHeading})"><path class="map-mower" d="M 13 0 L -9 -8 L -5 0 L -9 8 Z"></path></g>`;
+      group.innerHTML = `${render.markerAnimation}<g class="map-mower-rotate" transform="rotate(${render.currentHeading})"><rect class="map-mower-body" x="-9" y="-7" width="18" height="14" rx="5"></rect><circle class="map-mower-eye" cx="2" cy="0" r="2.6"></circle></g>`;
     }
 
     return true;
@@ -1276,7 +1286,7 @@ class EcovacsGoatCard extends HTMLElement {
   }
 
   _mapBounds(points) {
-    // A loop instead of Math.min(...xs): the sticky trail can grow to tens of
+    // A loop instead of Math.min(...xs): the point set can grow to tens of
     // thousands of points, and spreading that many arguments overflows the
     // JS engine's argument limit (RangeError).
     let minX = Infinity;
@@ -1319,30 +1329,6 @@ class EcovacsGoatCard extends HTMLElement {
     return path ? `${path} Z` : "";
   }
 
-  // Like _path, but starts a new subpath whenever consecutive points are
-  // further apart than trail_gap_limit. Slow-poll fallback (one getPos per
-  // minute) leaves multi-metre holes in the history; connecting them draws
-  // long straight strokes across the map that the mower never drove.
-  _trailPath(points, bounds, width, height) {
-    if (points.length < 2) {
-      return "";
-    }
-    const gapLimit = Number(this.config.trail_gap_limit) || 0;
-    let previous = null;
-    return points
-      .map((position, index) => {
-        const point = this._project(position, bounds, width, height);
-        const gap =
-          index > 0 &&
-          gapLimit > 0 &&
-          previous &&
-          Math.hypot(position.x - previous.x, position.y - previous.y) > gapLimit;
-        previous = position;
-        const command = index === 0 || gap ? "M" : "L";
-        return `${command} ${point.x.toFixed(1)} ${point.y.toFixed(1)}`;
-      })
-      .join(" ");
-  }
 
   _housePath(x, y) {
     const size = 10;

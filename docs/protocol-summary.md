@@ -65,32 +65,35 @@ as an anchor plus an 8-direction chain code, wrapped in the compact-LZMA blob:
 
 | Push | Payload | Meaning |
 | --- | --- | --- |
-| `onMI` (`type: "-1"`) | `[["1", "s1;<seq>;<x>,<y>;<chain>"], ["2", ...]]` | **Lawn outline** — the shape the app fills green. Arrives reliably during a job; while docked, `getMI` is acknowledged but the push follows only sometimes, and mid-job replies carry an empty `s1;0;` placeholder — consumers must persist the last real outline. |
+| `onMI` (`type: "-1"`) | `[["1", "s1;<seq>;<x>,<y>;<chain>"], ["2", ...]]` | **Lawn outline** — the shape the app fills green, plus `centerX`/`centerY`. Arrives reliably during a job; while docked, `getMI` is acknowledged but the push follows only sometimes, and mid-job replies carry an empty `s1;0;` placeholder, so the last real outline must be persisted. |
 | `onArI` | `["1", "<layer>", "<count>", "<id>;<x>,<y>;<chain>", ...]` | Numbered layers; layer **3** holds the **obstacle shapes** the app paints as holes in the lawn. |
-| `onMapTrack` | records whose third field is `...;x,y;x,y;...` | Window of recently **mowed coordinates** (the current job's cut path). |
+| `onMapTrack` | `["1", "<kind>", "<field>", ...]` | **What is still to be cut** — see below. Not a record of where the mower has been. |
 | `onPos` / `getRTK` | `deebotPos` / `rtks[0]` | Mower marker and RTK base station. |
 
-Chain-code decoding (calibrated against a live O1200 capture): `(n)` repeats
-the previous digit n extra times, and the digits walk a square grid where
-**even digits are the cardinal directions and odd digits the diagonals**
-(`2` = +Y, `4` = +X, `6` = -Y, `8` = -X, `1` = -X+Y, `3` = +X+Y, `5` = +X-Y,
-`7` = -X-Y). The Y axis matches the position frame — no mirroring.
+### onMapTrack: the remaining plan, not a trail
 
-**The grid scale is carried by the payload, not assumed:** `centerX`/`centerY`
-in the `onMI` message are the centre of the outline's bounding box in map
-units, so map units per cell = `(centerX - anchor_x) / cell_bbox_centre_x`,
-cross-checked against the Y axis. On the reference mower both axes yield
-exactly **50**, which is also the fallback for payloads that omit the centre.
-Deriving it (rather than hard-coding) keeps the decode correct for other
-gardens and firmware revisions.
+The mower plans a job as numbered lanes and reports **what is left** on each,
+re-sending a lane every couple of seconds as it shrinks. This is the layer the
+app hatches over the lawn and rubs out piece by piece; the app draws no trail
+of where the mower has driven, and neither should consumers of this push.
 
-With that, outline, obstacles, track, mower and dock all share one coordinate
-frame — **the dock is the origin `(0, 0)`**, so a docked mower legitimately
-reports position `(0, 0)`.
+The record's **second element** says what the push is:
 
-Chain codes emit one point per cell, so long straight edges arrive as hundreds
-of collinear points; collapsing them (`map_geometry.drop_collinear`) reduces a
-real outline from ~2200 points to ~220 without changing the shape.
+* `"1"` — a **full snapshot** of the remaining plan (75 lanes on the reference
+  garden, shrinking to 66 and beyond as work proceeds). It is authoritative:
+  finished lanes simply stop being listed rather than being reported empty, so
+  a snapshot must **replace** the known set, not merge into it.
+* `"2"` — an **update** to individual lanes.
+
+Each field is `<type>;<subtype>;<id>;<data>`:
+
+* subtype `"1"` — straight lanes as coordinates **in pairs**; each pair is one
+  segment, and a lane interrupted by an obstacle simply carries several pairs.
+  Joining lanes into one polyline draws lines across whatever lies between
+  them (a terrace, the house).
+* subtype `"2"` — a chain-coded shape: the **border lap** that follows the lawn
+  edge, which is the "edge finishing" pass at the end of a mow.
+* a field with an id but no coordinates means that lane is finished.
 
 Dead ends, so nobody retries them:
 
@@ -115,6 +118,13 @@ Dead ends, so nobody retries them:
 - `getProtectState` pushes are **partial**: a payload may carry only some of
   `isAnimProtect` / `isRainProtect` / `isRainDelay` / `isEStop` / `isLocked`,
   so absent flags must not clear previously reported ones.
+- `getCleanInfo`'s `trigger` says **why** the job is in its current state:
+  `app` (app/HA), `screen` (the mower's own panel), `sched`, `lowBattery`
+  (parked mid-job to recharge — the job stays `state: clean` with
+  `motionState: pause`), `continue` (picking an interrupted job back up),
+  `workComplete`, `alert`. The reference mower resumes at **80%** battery.
+- `getBreakPointStatus.continueLeftTime` reads 0 even mid-interruption; it is
+  not a countdown to resuming.
 - `setChildLock` is accepted but ignored by the O1200 firmware.
 - When a start is blocked (rain / animal protection), the mower accepts the
   command, drives for ~5 s, and returns on its own — that is not an error.

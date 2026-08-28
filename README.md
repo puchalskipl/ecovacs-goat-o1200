@@ -2,8 +2,8 @@
 
 A mower-only Home Assistant custom integration for ECOVACS GOAT lawn mowers,
 **tuned for the GOAT O1200 LiDAR Pro** (O-series): a live map built from the
-mower's own stored geometry (lawn outline, obstacles, mowed track, dock and
-mower position), cutting height control, battery telemetry, and a dashboard
+mower's own stored geometry (lawn outline, obstacles, the lanes still to be
+cut, dock and mower position), cutting height control, battery telemetry, and a dashboard
 card with mower controls. The integration domain is **`ecovacs_goat`**.
 
 It gives you a lawn mower entity, useful sensors, mower settings, and an optional dashboard card with the map and start / stop / dock / edge-trim controls.
@@ -32,7 +32,7 @@ For O-series mowers the integration:
 
 - Detects the model and reports it on the **GOAT model line** diagnostic sensor (with `family`, `map_dialect`, and an `experimental` flag).
 - Drives the lawn mower entity, start/pause/resume/stop/dock controls, status, battery, error, and the **live position map** (mower marker + path) from the shared position stream.
-- Decodes the **mowed track** (`onMapTrack` compact-LZMA pushes) and paints it on the card, resetting it when a new mowing task starts.
+- Decodes **what is still to be cut** (`onMapTrack` compact-LZMA pushes: the mower's numbered lanes plus the border lap) and hatches it on the card the way the app does, clearing it when a new mowing task starts.
 - Decodes the mower's own **lawn outline** (`onMI` chain-coded geometry) and the **obstacle shapes** it has learned (`onArI`, layer 3), and draws them the way the app does: a filled lawn with obstacle holes. The grid scale is derived from each map's own payload, and the decoded geometry is persisted so it survives restarts.
 - Exposes the **cutting height** (`AreaParameters.mowHeightLevel`, level x 10 mm on the O1200) as a number entity, plus battery temperature / current / voltage telemetry sensors from the `onFwBuryPoint-bd_*` stream.
 - Keeps the app-style live map session alive automatically while mowing (the `auto_live_map` option, on by default) so all of the above streams without the official app being open.
@@ -52,7 +52,7 @@ The goal is to keep communication with the mower conservative: use pushed update
 - Settings for cutting height, rain delay, animal protection, AI recognition, edge mowing, warning switches, cut direction, mowing efficiency, obstacle avoidance, and speaker volumes.
 - Edge trimming (the app's border-cut job) as its own button.
 - Timestamps and summaries of the last mowing and the last edge trim.
-- Optional Lovelace card that draws the mower's own map: lawn outline, obstacles, mowed track, dock, and mower.
+- Optional Lovelace card that draws the mower's own map the way the app does: lawn outline, obstacles, the lanes still to be cut, dock, and mower.
 - Opt-in debug capture tools for troubleshooting.
 
 ## Installation With HACS
@@ -121,9 +121,7 @@ dashboard column does not push the controls below the fold.
 
 The card falls back to `sensor.mower_live_map` when `map_entity` is not set, so
 set it explicitly if your mower's entities use a different prefix — otherwise
-the map shows "Waiting for live map data" forever. `trail_gap_limit`
-(map units, default `500`) controls when the live trail is split instead of
-drawing a straight line between distant points; set `0` to disable splitting.
+the map shows "Waiting for live map data" forever. 
 
 ## How It Behaves
 
@@ -147,11 +145,18 @@ picture the official app does, from four layers:
    rather than drawn wrong.
 2. **Obstacles** — chain-coded shapes the mower has learned (`onArI`,
    layer 3), punched out of the lawn as holes with `fill-rule="evenodd"`.
-3. **Mowed track** — the current job's cut path, accumulated from
-   `onMapTrack` pushes and reset when a new job starts (as in the app).
+3. **What is still to be cut** — the mower plans a job as numbered lanes and
+   reports what is left on each of them (`onMapTrack`), shrinking them as it
+   works. The card hatches those over the lawn and they disappear lane by
+   lane, exactly as the app does. The lanes are separate segments, never
+   joined into one path. The same layer carries the **border lap** — the edge
+   finishing pass — as a chain-coded shape.
 4. **Mower and dock** — the mower marker from `onPos`, the dock at the origin
    `(0, 0)`; the dock *is* the coordinate frame's origin, so a docked mower
    legitimately reports `(0, 0)`.
+
+There is deliberately **no trail of where the mower has driven**: the official
+app does not draw one either.
 
 All four share one coordinate frame. The chain code's grid scale is read out
 of the mower's own payload (`centerX`/`centerY` give the outline's bounding-box

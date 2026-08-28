@@ -432,7 +432,10 @@ def _state_with_decoded_map(mid: str) -> MowerState:
             uwb_positions=(MapPosition(x=1, y=1),),
             position_history=(MapPosition(x=2, y=2), MapPosition(x=3, y=3)),
             info=MowerMapInfo(batch_id="old", outline=outline),
-            trace=MowerMapTrace(batch_id="old", path=(MapPosition(x=4, y=4),)),
+            trace=MowerMapTrace(
+                batch_id="old",
+                lanes={"1": ((MapPosition(x=4, y=4), MapPosition(x=4, y=9)),)},
+            ),
             revision=7,
         )
     )
@@ -454,7 +457,7 @@ def test_remap_new_map_id_clears_stale_geometry() -> None:
     assert state.map.mid == "200"
     assert state.map.info.outline == ()
     assert state.map.info.batch_id is None
-    assert state.map.trace.path == ()
+    assert state.map.trace.lanes == {}
     assert state.map.position_history == ()
     assert state.map.charge_positions == ()
     assert state.map.uwb_positions == ()
@@ -478,7 +481,7 @@ def test_same_map_id_keeps_existing_geometry() -> None:
 
     assert state.map.mid == "100"
     assert state.map.info.outline != ()
-    assert state.map.trace.path != ()
+    assert state.map.trace.lanes != {}
 
 
 def test_base_map_reply_does_not_re_own_active_map_id() -> None:

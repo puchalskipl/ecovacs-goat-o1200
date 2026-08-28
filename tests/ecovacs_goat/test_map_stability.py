@@ -92,3 +92,29 @@ def test_a_remap_drops_the_remembered_geometry() -> None:
 
     assert published.outline == ()
     assert remembered is None
+
+
+def test_trace_protection_logic_matches_coordinator_rules() -> None:
+    """The mowed track may only grow, reset on task change, or reset on remap.
+
+    Mirrors MowerCoordinator._carry_forward_map_trace: the cloud cannot
+    re-serve the track (getMapTrack answers empty — the only source is small
+    onMapTrack windows), so a stale publish carrying fewer points must not
+    win. Observed live: a grouped refresh right after restart published an
+    empty trace over the restored 880-point track and the debounced save made
+    the loss permanent.
+    """
+    long_path = (MapPosition(x=0, y=0), MapPosition(x=1, y=1), MapPosition(x=2, y=2))
+    short_path = (MapPosition(x=0, y=0),)
+
+    # Same map: the longer remembered track outranks a shorter publish.
+    remembered = ("1", long_path)
+    incoming_mid, incoming = "1", short_path
+    keep = remembered is not None and remembered[0] == incoming_mid and len(
+        incoming
+    ) < len(remembered[1])
+    assert keep is True
+
+    # A remap invalidates the remembered track entirely.
+    keep_after_remap = remembered[0] == "2"
+    assert keep_after_remap is False

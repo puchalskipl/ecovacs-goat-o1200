@@ -8,10 +8,11 @@ from typing import Any
 
 POSITION_HISTORY_ATTRIBUTE_POINTS = 800
 POSITION_HISTORY_DENSE_TAIL_POINTS = 600
-# O-series mowers stream the full mowed track (onMapTrack); 120 sampled points
-# collapse whole lanes, so keep the trace attribute much denser than the G1
-# heading-gated trace needed.
-TRACE_ATTRIBUTE_POINTS = 1200
+# O-series mowers stream the full mowed track (onMapTrack) at roughly one
+# point per 1-2 m of travel, so a full session over ~250 m2 needs ~4000
+# points. Decimating below that tears the drawn lanes apart (the card splits
+# the line at large gaps), so the cap matches the accumulation cap.
+TRACE_ATTRIBUTE_POINTS = 4000
 # The outline/obstacles arrive as chain codes and are simplified on decode
 # (collinear runs collapsed), so these caps only guard against pathological
 # shapes rather than trimming normal detail.
@@ -272,11 +273,27 @@ class MowerMapTrace:
     type: str | None = None
     chunks: dict[int, str] = field(default_factory=dict)
     path: tuple[MapPosition, ...] = ()
+    # What the mower still has to cut, keyed by the lane id it assigns.
+    # Each lane holds one or more separate segments (a lane split by an
+    # obstacle has several), and the mower shrinks them as it works — this is
+    # the layer the app hatches over the lawn and rubs out piece by piece.
+    # They are NOT one path: joining lanes would draw lines across whatever
+    # lies between them.
+    lanes: dict[str, tuple[tuple[MapPosition, ...], ...]] = field(
+        default_factory=dict
+    )
+
+    @property
+    def pending_segments(self) -> tuple[tuple[MapPosition, ...], ...]:
+        """Return every segment still to be cut, across all lanes."""
+        return tuple(
+            segment for lane in self.lanes.values() for segment in lane
+        )
 
     @property
     def complete(self) -> bool:
         """Return whether the received chunks look contiguous."""
-        if self.path:
+        if self.path or self.lanes:
             return True
         if not self.chunks:
             return False
@@ -293,6 +310,10 @@ class MowerMapTrace:
             "complete": self.complete,
             "chunk_count": len(self.chunks),
             "chunk_indexes": sorted(self.chunks),
+            "pending": [
+                [position.as_dict() for position in segment]
+                for segment in self.pending_segments
+            ],
             "path": [
                 position.as_dict()
                 for position in _sample_positions(self.path, TRACE_ATTRIBUTE_POINTS)
@@ -465,6 +486,13 @@ class MowerState:
     # Active job type reported by cleanState.content.type: "auto" for a full
     # mow, "borderrotate" for edge trimming; None when no job is running.
     clean_type: str | None = None
+    # Why the job is in its current state, straight from the mower's
+    # ``trigger`` field: "app" (started by app/HA), "sched" (schedule),
+    # "lowBattery" (paused to recharge, resumes by itself), "continue"
+    # (resuming an interrupted job), "workComplete", "alert" (error). A
+    # paused job plus this field is what separates "recharging, will carry
+    # on" from "someone pressed pause".
+    clean_trigger: str | None = None
     # Firmware version reported by getOta/onOta.
     firmware_version: str | None = None
     # Whether the cloud reports a pending firmware update (device updateInfo).

@@ -120,15 +120,15 @@ def test_obstacles_only_come_from_their_layer() -> None:
 
 def test_obstacles_use_the_maps_derived_scale() -> None:
     """Obstacles sit on the same grid as the outline, so they share its scale."""
-    # An L shape: 10 cells east, then 10 cells north (a straight line would
+    # An L shape: 9 cells east, then 9 cells north (a straight line would
     # collapse to two points and be dropped as noise).
     decoded = [["1", "3", "1", "100;0,0;4(9)2(9)"]]
 
     default = obstacles_from_area_info(decoded)[0]
     scaled = obstacles_from_area_info(decoded, step=10)[0]
 
-    assert max(point.x for point in default) == 10 * CHAIN_STEP
-    assert max(point.x for point in scaled) == 10 * 10
+    assert max(point.x for point in default) == 9 * CHAIN_STEP
+    assert max(point.x for point in scaled) == 9 * 10
 
 
 def test_collinear_runs_are_collapsed() -> None:
@@ -136,4 +136,19 @@ def test_collinear_runs_are_collapsed() -> None:
     straight = decode_chain_shape(MapPosition(x=0, y=0), "4(99)")
 
     assert len(straight) == 2
-    assert straight[-1].x == 100 * CHAIN_STEP
+    # "(99)" is the total number of steps, not 99 on top of the first one.
+    assert straight[-1].x == 99 * CHAIN_STEP
+
+
+def test_repeat_count_is_the_total_number_of_steps() -> None:
+    """d(n) walks n cells; reading it as n extra cells broke closed shapes.
+
+    On a live capture the outline only closes back onto its anchor under this
+    reading (one cell short instead of seventeen), and only then does the
+    payload's own centre yield the same scale from both axes.
+    """
+    three = decode_chain_shape(MapPosition(x=0, y=0), "4(3)", step=10)
+    bare = decode_chain_shape(MapPosition(x=0, y=0), "4", step=10)
+
+    assert three[-1].x == 30
+    assert bare[-1].x == 10

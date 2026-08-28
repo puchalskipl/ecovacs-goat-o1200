@@ -72,9 +72,18 @@ def _mqtt(state: MowerState, command: str, data: dict) -> MowerState:
 
 
 def _track_push(
-    state: MowerState, coordinates: str, *, batid: str = "kpoiba"
+    state: MowerState,
+    field: str,
+    *,
+    extra_fields: list[str] | None = None,
+    kind: str = "2",
+    batid: str = "kpoiba",
 ) -> MowerState:
-    """Apply one onMapTrack push carrying the given coordinate string."""
+    """Apply one onMapTrack push carrying the given lane record(s).
+
+    ``kind`` is the record's second token: "1" is a full snapshot of the
+    remaining plan, "2" an update to individual lanes.
+    """
     return _mqtt(
         state,
         "onMapTrack",
@@ -86,7 +95,7 @@ def _track_push(
             "batid": batid,
             "serial": "1",
             "index": "0",
-            "info": _compact_lzma_blob([["1", "2", coordinates]]),
+            "info": _compact_lzma_blob([["1", kind, field, *(extra_fields or [])]]),
             "infoSize": 72,
         },
     )
@@ -99,26 +108,108 @@ def test_blob_helper_round_trips_through_shared_decoder() -> None:
     assert decoded == payload
 
 
-def test_on_map_track_push_accumulates_track() -> None:
-    """onMapTrack windows accumulate into the trace path across pushes."""
-    state = MowerState()
-    state = _track_push(state, "1;1;74;-20025,11849;-20025,13700")
-    state = _track_push(state, "1;1;74;-20025,13700;-20025,14499", batid="second")
+def test_on_map_track_reports_what_is_left_to_cut() -> None:
+    """onMapTrack lanes are the remaining work, replaced as they shrink.
 
-    points = [(p.x, p.y) for p in state.map.trace.path]
-    assert points == [(-20025, 11849), (-20025, 13700), (-20025, 14499)]
-    assert state.map.trace.batch_id == "second"
-    # Header tokens ("1", "1", "74") must not be parsed as coordinates.
-    assert all(abs(x) > 100 for x, _ in points)
+    Verified against a live capture: the mower re-sends the same lane id every
+    couple of seconds with a shorter span as it works through it. Accumulating
+    those reports (rather than replacing) built a scribble of duplicated
+    points, and joining lanes drew lines across the middle of the garden.
+    """
+    state = _track_push(state=MowerState(), field="1;1;97;-17750,11849;-17750,17400")
+    assert state.map.trace.lanes["97"] == (
+        (MapPosition(x=-17750, y=11849), MapPosition(x=-17750, y=17400)),
+    )
+
+    # The mower has cut part of it: the same lane comes back shorter.
+    state = _track_push(state, field="1;1;97;-17750,15100;-17750,17400")
+    assert state.map.trace.lanes["97"] == (
+        (MapPosition(x=-17750, y=15100), MapPosition(x=-17750, y=17400)),
+    )
+    assert len(state.map.trace.pending_segments) == 1
 
 
-def test_on_map_track_push_caps_accumulated_points(monkeypatch) -> None:
-    """The accumulated track keeps only the newest points once at the cap."""
-    monkeypatch.setattr(mower_messages, "O_SERIES_TRACK_MAX_POINTS", 3)
-    state = MowerState()
-    state = _track_push(state, "1;1;74;-1,1;-2,2;-3,3;-4,4")
+def test_a_finished_lane_disappears() -> None:
+    """A lane reported without coordinates is done and stops being drawn."""
+    state = _track_push(state=MowerState(), field="1;1;98;-17650,11800;-17650,16900")
+    assert "98" in state.map.trace.lanes
 
-    assert [(p.x, p.y) for p in state.map.trace.path] == [(-2, 2), (-3, 3), (-4, 4)]
+    state = _track_push(state, field="1;1;98")
+    assert "98" not in state.map.trace.lanes
+    assert state.map.trace.pending_segments == ()
+
+
+def test_a_lane_split_by_an_obstacle_stays_split() -> None:
+    """Coordinates come in pairs, so a gap in a lane is not drawn over."""
+    state = _track_push(
+        state=MowerState(), field="1;1;273;-149,-549;-149,-300;-149,300;-149,549"
+    )
+
+    assert state.map.trace.lanes["273"] == (
+        (MapPosition(x=-149, y=-549), MapPosition(x=-149, y=-300)),
+        (MapPosition(x=-149, y=300), MapPosition(x=-149, y=549)),
+    )
+
+
+def test_border_lap_arrives_as_a_chain_code() -> None:
+    """The edge lap is sent as a chain-coded shape (second token "2")."""
+    state = _track_push(state=MowerState(), field="1;2;0;-23900,17500;4(3)2(3)8(3)6(3)")
+
+    border = state.map.trace.lanes["0"]
+    assert len(border) == 1
+    assert border[0][0] == MapPosition(x=-23900, y=17500)
+    assert len(border[0]) >= 3
+
+
+def test_whole_plan_and_single_lane_updates_coexist() -> None:
+    """A job starts with the full plan, then single lanes update in place."""
+    plan = "1;1;26;-24850,3550;-24850,6700"
+    other = "1;1;27;-24750,1499;-24750,17250"
+    state = _track_push(
+        state=MowerState(), field=plan, extra_fields=[other], kind="1"
+    )
+    assert set(state.map.trace.lanes) == {"26", "27"}
+
+    state = _track_push(state, field="1;1;26;-24850,5000;-24850,6700")
+    assert set(state.map.trace.lanes) == {"26", "27"}
+    assert state.map.trace.lanes["26"][0][0].y == 5000
+
+
+def test_a_snapshot_retires_lanes_it_no_longer_lists() -> None:
+    """Finished lanes drop out of the plan rather than being reported empty.
+
+    Live capture: the snapshot shrank 75 -> 66 lanes as the mower worked,
+    without ever reporting the finished ones. Merging snapshots instead of
+    replacing would leave every finished lane hatched on the map forever.
+    """
+    state = _track_push(
+        state=MowerState(),
+        field="1;1;26;-24850,3550;-24850,6700",
+        extra_fields=["1;1;27;-24750,1499;-24750,17250"],
+        kind="1",
+    )
+    assert set(state.map.trace.lanes) == {"26", "27"}
+
+    # Lane 26 is done: the next snapshot simply does not mention it.
+    state = _track_push(
+        state, field="1;1;27;-24750,1499;-24750,17250", kind="1"
+    )
+
+    assert set(state.map.trace.lanes) == {"27"}
+
+
+def test_an_update_never_retires_lanes_it_does_not_mention() -> None:
+    """Incremental pushes touch one lane; the rest of the plan must survive."""
+    state = _track_push(
+        state=MowerState(),
+        field="1;1;26;-24850,3550;-24850,6700",
+        extra_fields=["1;1;27;-24750,1499;-24750,17250"],
+        kind="1",
+    )
+
+    state = _track_push(state, field="1;1;26;-24850,5000;-24850,6700")
+
+    assert set(state.map.trace.lanes) == {"26", "27"}
 
 
 def test_get_area_set_layer_still_uses_subsets_shape() -> None:
@@ -538,7 +629,7 @@ def test_position_placeholder_mid_does_not_wipe_geometry() -> None:
     after every map reply.
     """
     state = MowerState()
-    state = _track_push(state, "1;1;74;-20025,11849;-20025,13700")
+    state = _track_push(state, field="1;1;74;-20025,11849;-20025,13700")
     state = _mqtt(state, "onMI", {"mid": "1", "centerX": -12450, "centerY": 8300})
     assert state.map.mid == "1"
 
@@ -548,7 +639,7 @@ def test_position_placeholder_mid_does_not_wipe_geometry() -> None:
         {"deebotPos": {"x": -20011, "y": 14243, "a": -109, "invalid": 0}, "mid": "0"},
     )
     assert state.map.mid == "1"
-    assert len(state.map.trace.path) == 2
+    assert state.map.trace.lanes
 
     # A real remap (a different non-placeholder id) still resets geometry.
     state = _mqtt(
@@ -557,7 +648,7 @@ def test_position_placeholder_mid_does_not_wipe_geometry() -> None:
         {"deebotPos": {"x": 0, "y": 0, "a": 0, "invalid": 0}, "mid": "2"},
     )
     assert state.map.mid == "2"
-    assert state.map.trace.path == ()
+    assert state.map.trace.lanes == {}
 
 
 def test_last_job_record_roundtrip() -> None:
@@ -613,3 +704,81 @@ def test_partial_protect_state_does_not_clear_active_protection() -> None:
     # An explicit zero does clear it.
     state = _mqtt(state, "onProtectState", {"isAnimProtect": 0})
     assert state.protections.animal_active is False
+
+
+def test_recharge_pause_is_distinguishable_from_a_manual_pause() -> None:
+    """The mower says why it stopped, so "recharging" is not just "paused".
+
+    Payload shape taken from a live mid-job recharge: the job stays in
+    ``state: clean`` with ``motionState: pause`` and ``trigger: lowBattery``
+    while the mower sits on the dock charging, then comes back with
+    ``trigger: continue``.
+    """
+    state = _mqtt(
+        MowerState(),
+        "onCleanInfo",
+        {
+            "trigger": "lowBattery",
+            "state": "clean",
+            "cleanState": {
+                "motionState": "pause",
+                "cid": "122",
+                "content": {"type": "auto"},
+            },
+        },
+    )
+
+    assert state.activity is MowerActivity.PAUSED
+    assert state.clean_trigger == "lowBattery"
+    assert state.clean_type == "auto"
+
+    # A person pausing the same job reports a different reason.
+    manual = _mqtt(
+        MowerState(),
+        "onCleanInfo",
+        {
+            "trigger": "app",
+            "state": "clean",
+            "cleanState": {"motionState": "pause", "content": {"type": "auto"}},
+        },
+    )
+    assert manual.activity is MowerActivity.PAUSED
+    assert manual.clean_trigger == "app"
+
+
+def test_resume_after_recharge_reports_continue() -> None:
+    """Picking an interrupted job back up is its own trigger."""
+    state = _mqtt(
+        MowerState(),
+        "onCleanInfo",
+        {
+            "trigger": "continue",
+            "state": "clean",
+            "cleanState": {"motionState": "working", "content": {"type": "auto"}},
+        },
+    )
+
+    assert state.activity is MowerActivity.MOWING
+    assert state.clean_trigger == "continue"
+
+
+def test_trigger_is_kept_across_pushes_that_omit_it_and_cleared_when_idle() -> None:
+    """The reason outlives one message, but must not outlive the job."""
+    state = _mqtt(
+        MowerState(),
+        "onCleanInfo",
+        {
+            "trigger": "lowBattery",
+            "state": "clean",
+            "cleanState": {"motionState": "pause", "content": {"type": "auto"}},
+        },
+    )
+    state = _mqtt(
+        state,
+        "onCleanInfo",
+        {"state": "clean", "cleanState": {"motionState": "pause"}},
+    )
+    assert state.clean_trigger == "lowBattery"
+
+    finished = _mqtt(state, "onCleanInfo", {"state": "idle"})
+    assert finished.clean_trigger is None

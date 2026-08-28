@@ -115,7 +115,7 @@ MAP_HISTORY_STORE_VERSION = 1
 # Bumped whenever the map decoder changes shape/scale semantics: stored
 # geometry from an older decoder is wrong on the new one, so it is dropped
 # instead of being shown until the mower sends a fresh map.
-MAP_GEOMETRY_VERSION = 2
+MAP_GEOMETRY_VERSION = 3
 MAP_HISTORY_STORE_DELAY_SECONDS = 5
 
 # Polling policy:
@@ -341,7 +341,7 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
                     or self.data.map.current_position,
                     position_history=stored_map.position_history,
                     trace=replace(
-                        self.data.map.trace, path=stored_map.trace.path
+                        self.data.map.trace, lanes=stored_map.trace.lanes
                     ),
                     charge_positions=stored_map.charge_positions,
                     info=replace(
@@ -352,12 +352,17 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
                         or self.data.map.info.obstacles,
                         outline_source=stored_map.info.outline_source
                         or self.data.map.info.outline_source,
+                        # Without this the grid scale is lost on restart and
+                        # obstacles arriving before the next onMI would decode
+                        # at the fallback step instead of this map's own.
+                        chain_step=stored_map.info.chain_step
+                        or self.data.map.info.chain_step,
                     ),
                 ),
             )
             self._saved_map_snapshot = (
                 stored_map.position_history,
-                stored_map.trace.path,
+                stored_map.trace.lanes,
                 stored_map.mid,
                 stored_map.charge_positions,
                 stored_map.current_position,
@@ -516,7 +521,17 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
             if isinstance(current, dict)
             else None,
             position_history=positions(stored.get("position_history")),
-            trace=MowerMapTrace(path=positions(stored.get("trace_path"))),
+            trace=MowerMapTrace(
+                lanes={
+                    str(lane_id): tuple(
+                        positions(segment) for segment in segments if segment
+                    )
+                    for lane_id, segments in (
+                        stored.get("trace_lanes") or {}
+                    ).items()
+                    if segments
+                }
+            ),
             charge_positions=positions(stored.get("charge_positions")),
             info=MowerMapInfo(
                 outline=positions(stored.get("outline")) if geometry_current else (),
@@ -532,7 +547,7 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
         """Debounce writes of the persisted map geometry to HA storage."""
         snapshot = (
             mower_map.position_history,
-            mower_map.trace.path,
+            mower_map.trace.lanes,
             mower_map.mid,
             mower_map.charge_positions,
             mower_map.current_position,
@@ -556,9 +571,13 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
             "position_history": [
                 position.as_dict() for position in mower_map.position_history
             ],
-            "trace_path": [
-                position.as_dict() for position in mower_map.trace.path
-            ],
+            "trace_lanes": {
+                lane_id: [
+                    [position.as_dict() for position in segment]
+                    for segment in segments
+                ]
+                for lane_id, segments in mower_map.trace.lanes.items()
+            },
             "obstacles": [
                 [position.as_dict() for position in obstacle]
                 for obstacle in mower_map.info.obstacles
@@ -791,12 +810,12 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
             and previous.task_id is not None
             and data.task_id is not None
             and data.task_id != previous.task_id
-            and data.map.trace.path
+            and data.map.trace.lanes
         ):
             data = replace(
                 data,
                 map=replace(
-                    data.map, trace=replace(data.map.trace, path=())
+                    data.map, trace=replace(data.map.trace, lanes={})
                 ),
             )
         data = self._carry_forward_map_geometry(previous, data)
