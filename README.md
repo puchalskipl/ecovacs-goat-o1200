@@ -51,7 +51,8 @@ The goal is to keep communication with the mower conservative: use pushed update
 - Battery, error, Wi-Fi, current mow, total mow, and consumable sensors.
 - Settings for cutting height, rain delay, animal protection, AI recognition, edge mowing, warning switches, cut direction, mowing efficiency, obstacle avoidance, and speaker volumes.
 - Edge trimming (the app's border-cut job) as its own button.
-- Timestamps and summaries of the last mowing and the last edge trim.
+- Timestamps and summaries of the last mowing and the last edge trim, including how long the job took from start to finish (mid-job recharges included) — the mower keeps no dated history of its own, so the integration tracks jobs itself and persists one in progress so a Home Assistant restart does not reset the clock.
+- Why the mower is doing what it is doing: `pause_reason` and `resumes_automatically` on the lawn mower entity tell a mid-job recharge (which carries on by itself) apart from a pause somebody pressed, and `charging` comes straight from the mower rather than being guessed.
 - Optional Lovelace card that draws the mower's own map the way the app does: lawn outline, obstacles, the lanes still to be cut, dock, and mower.
 - Opt-in debug capture tools for troubleshooting.
 
@@ -130,6 +131,8 @@ The integration tries to be conservative with the mower and cloud connection:
 - It prefers live updates pushed by ECOVACS over MQTT.
 - It refreshes grouped state at startup and after meaningful MQTT changes (with a short debounced readback).
 - It avoids broad background polling loops.
+- Map geometry and the remaining-work lanes only ever change on the mower's own pushes. A grouped refresh assembles its result from a snapshot taken seconds earlier, so publishing it verbatim would make those layers flicker between the new picture and the old one.
+- Decoded geometry is persisted and versioned: after a decoder change the stored shapes are dropped and refetched rather than drawn wrong.
 
 ### Live map: what is drawn and where it comes from
 

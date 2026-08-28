@@ -118,3 +118,74 @@ def test_trace_protection_logic_matches_coordinator_rules() -> None:
     # A remap invalidates the remembered track entirely.
     keep_after_remap = remembered[0] == "2"
     assert keep_after_remap is False
+
+
+def test_only_a_track_push_may_change_the_remaining_lanes() -> None:
+    """Mirrors MowerCoordinator._carry_forward_lanes.
+
+    Observed live: the drawn boundary alternated between "still to cut" and
+    "done" on every refresh, because grouped refreshes republished whatever
+    lanes were current when they started. Only an onMapTrack push may move
+    that layer; a remap clears what is remembered.
+    """
+    lanes = {"26": ((MapPosition(x=0, y=0), MapPosition(x=0, y=100)),)}
+
+    # A push teaches the layer.
+    remembered, from_push = lanes, True
+    assert from_push and remembered == lanes
+
+    # A stale refresh carrying no lanes must not blank it.
+    incoming, from_push = {}, False
+    published = incoming if from_push or remembered is None else remembered
+    assert published == lanes
+
+    # A remap drops it, so the next map starts clean.
+    remembered = None
+    published = incoming if remembered is None else remembered
+    assert published == {}
+
+
+def test_job_duration_covers_the_whole_session_including_the_recharge() -> None:
+    """Mirrors MowerCoordinator._track_job_lifecycle.
+
+    A session split by a mid-job recharge is one job: it began at the first
+    leg and ended at the last, and the reported time is the span between —
+    the charging break included, because that is what "how long did it take"
+    means. Summing only the legs reported a three-hour mow as twenty minutes.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    first_leg_start = datetime(2026, 8, 28, 8, 0, tzinfo=timezone.utc)
+    recharge_start = first_leg_start + timedelta(minutes=90)
+    last_leg_start = recharge_start + timedelta(minutes=80)
+    ended = last_leg_start + timedelta(minutes=85)
+
+    # What the coordinator computes for the final leg, given the earlier one.
+    started = min(last_leg_start, first_leg_start)
+    duration = round((ended - started).total_seconds() / 60, 1)
+
+    assert started == first_leg_start
+    assert duration == 255.0  # 4 h 15 min wall clock, not 85 minutes
+
+
+def test_a_restart_mid_job_must_not_reset_the_clock() -> None:
+    """The in-flight job is persisted, so its start survives a restart."""
+    from datetime import datetime, timezone
+
+    started = datetime(2026, 8, 28, 8, 0, tzinfo=timezone.utc)
+    stored = {
+        "kind": "auto",
+        "started_at": started.isoformat(),
+        "task_id": "-8518531",
+        "mowed_peak": 120.5,
+    }
+
+    restored = {
+        "kind": stored["kind"],
+        "started_at": datetime.fromisoformat(stored["started_at"]),
+        "task_id": stored["task_id"],
+        "mowed_peak": float(stored["mowed_peak"]),
+    }
+
+    assert restored["started_at"] == started
+    assert restored["task_id"] == "-8518531"

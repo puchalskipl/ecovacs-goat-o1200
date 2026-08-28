@@ -282,6 +282,11 @@ class MowerMapTrace:
     lanes: dict[str, tuple[tuple[MapPosition, ...], ...]] = field(
         default_factory=dict
     )
+    # The edge lap still to drive, sent chain-coded alongside the lanes. Kept
+    # apart because it is drawn differently (it runs along the lawn boundary)
+    # and because it can shrink to a straight run, so it cannot be told from a
+    # lane by shape alone.
+    border: tuple[tuple[MapPosition, ...], ...] = ()
 
     @property
     def pending_segments(self) -> tuple[tuple[MapPosition, ...], ...]:
@@ -313,6 +318,10 @@ class MowerMapTrace:
             "pending": [
                 [position.as_dict() for position in segment]
                 for segment in self.pending_segments
+            ],
+            "border": [
+                [position.as_dict() for position in segment]
+                for segment in self.border
             ],
             "path": [
                 position.as_dict()

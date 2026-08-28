@@ -153,12 +153,52 @@ def test_a_lane_split_by_an_obstacle_stays_split() -> None:
 
 def test_border_lap_arrives_as_a_chain_code() -> None:
     """The edge lap is sent as a chain-coded shape (second token "2")."""
-    state = _track_push(state=MowerState(), field="1;2;0;-23900,17500;4(3)2(3)8(3)6(3)")
+    state = _track_push(
+        state=MowerState(), field="1;2;0;-23900,17500;4(3)2(3)8(3)6(3)", kind="1"
+    )
 
-    border = state.map.trace.lanes["0"]
+    border = state.map.trace.border
     assert len(border) == 1
     assert border[0][0] == MapPosition(x=-23900, y=17500)
     assert len(border[0]) >= 3
+    # It is not a lane: once mostly driven it shrinks to a straight run, so
+    # shape alone cannot tell the two apart.
+    assert state.map.trace.lanes == {}
+
+
+def test_border_lap_ignores_the_stub_sent_between_snapshots() -> None:
+    """Two different things share the border's lane id; only one is the plan.
+
+    Live capture during an edge pass: snapshots carry the whole remaining
+    loop, while the updates in between carry a few cells around wherever the
+    mower is at that second. Taking both makes the border flicker between the
+    full loop and a stub, which is what showed on the map as a border that
+    covered only part of the perimeter.
+    """
+    loop = "1;2;0;-23900,17500;4(3)2(3)8(3)6(3)"
+    state = _track_push(state=MowerState(), field=loop, kind="1")
+    full = state.map.trace.border
+
+    # A stub at the mower's current position arrives two seconds later.
+    state = _track_push(state, field="1;2;0;-450,7100;4(2)")
+
+    assert state.map.trace.border == full
+
+
+def test_a_snapshot_without_the_edge_lap_means_it_is_finished() -> None:
+    """The lap drops out of the plan when done, like any other piece of work."""
+    state = _track_push(
+        state=MowerState(),
+        field="1;2;0;-23900,17500;4(3)2(3)8(3)6(3)",
+        extra_fields=["1;1;26;-24850,3550;-24850,6700"],
+        kind="1",
+    )
+    assert state.map.trace.border
+
+    state = _track_push(state, field="1;1;26;-24850,5000;-24850,6700", kind="1")
+
+    assert state.map.trace.border == ()
+    assert set(state.map.trace.lanes) == {"26"}
 
 
 def test_whole_plan_and_single_lane_updates_coexist() -> None:

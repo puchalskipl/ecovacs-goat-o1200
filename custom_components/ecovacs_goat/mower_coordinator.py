@@ -64,6 +64,11 @@ APP_LIVE_MAP_TYPES = ("ar", "vw", "fe")
 MQTT_READBACK_DEBOUNCE_SECONDS = 3
 # Pushes that carry new map geometry (lawn outline / obstacle shapes).
 GEOMETRY_PUSH_COMMANDS = {"onMI", "onArI"}
+# Push that carries the remaining-work lanes. Like the geometry above, only
+# this may change them: a grouped refresh assembled moments earlier would
+# otherwise publish whatever lanes were current then, and the layer would
+# flicker between the two.
+TRACK_PUSH_COMMANDS = {"onMapTrack"}
 # Incomplete chunked-onInfo batches kept before assuming the rest are stale.
 INFO_CHUNK_MAX_BATCHES = 8
 # Availability watchdog: probe cadence and how long the mower may stay silent
@@ -306,6 +311,9 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
         # Set while publishing an onMI/onArI push, whose geometry is new
         # by definition and therefore replaces what we remembered.
         self._geometry_push_pending = False
+        # Same idea for the remaining-work lanes (see TRACK_PUSH_COMMANDS).
+        self._track_push_pending = False
+        self._remembered_lanes: dict[str, tuple] | None = None
         # In-flight job being tracked for the last-job summaries.
         self._active_job: dict[str, Any] | None = None
         # Last-job records restored from storage before the first refresh.
@@ -489,6 +497,20 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
             if job is not None
         }
 
+        # A job that was still running when Home Assistant stopped: without
+        # this the clock restarts on every restart and a three-hour session
+        # gets recorded as however long the last leg happened to be.
+        active = stored.get("active_job")
+        if isinstance(active, dict) and active.get("started_at"):
+            started = dt_util.parse_datetime(str(active["started_at"]))
+            if started is not None:
+                self._active_job = {
+                    "kind": active.get("kind") or JOB_KIND_MOWING,
+                    "started_at": started,
+                    "task_id": active.get("task_id"),
+                    "mowed_peak": float(active.get("mowed_peak") or 0.0),
+                }
+
         def positions(value: Any) -> tuple[MapPosition, ...]:
             if not isinstance(value, list):
                 return ()
@@ -594,6 +616,12 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
             "outline_source": mower_map.info.outline_source,
             "chain_step": mower_map.info.chain_step,
             "geometry_version": MAP_GEOMETRY_VERSION,
+            "active_job": {
+                **self._active_job,
+                "started_at": self._active_job["started_at"].isoformat(),
+            }
+            if self._active_job
+            else None,
             "last_jobs": {
                 kind: job.as_dict()
                 for kind, job in (
@@ -659,6 +687,7 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
                     return
                 previous_state = self.data
                 self._geometry_push_pending = command in GEOMETRY_PUSH_COMMANDS
+                self._track_push_pending = command in TRACK_PUSH_COMMANDS
                 state = apply_mqtt_payload(self.data, topic, payload)
                 if command == "onPos":
                     self._last_position_mqtt_at = self._last_mqtt_at
@@ -818,10 +847,44 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
                     data.map, trace=replace(data.map.trace, lanes={})
                 ),
             )
+            self._remembered_lanes = {}
+        data = self._carry_forward_lanes(previous, data)
         data = self._carry_forward_map_geometry(previous, data)
         data = self._maybe_update_outline(data)
         super().async_set_updated_data(data)
         self._schedule_map_history_save(data.map)
+
+    def _carry_forward_lanes(
+        self, previous: MowerState | None, data: MowerState
+    ) -> MowerState:
+        """Let only an onMapTrack push change the remaining-work lanes.
+
+        Everything else that publishes state — grouped refreshes above all —
+        was assembled before the newest push and carries older lanes. Left
+        alone it makes the layer flicker, which shows up as a boundary that
+        alternates between "still to cut" and "done" on every redraw.
+        """
+        if (
+            previous is not None
+            and data.map.mid is not None
+            and previous.map.mid != data.map.mid
+        ):
+            self._remembered_lanes = None
+        if self._track_push_pending:
+            self._track_push_pending = False
+            self._remembered_lanes = data.map.trace.lanes
+            return data
+        if self._remembered_lanes is None or (
+            data.map.trace.lanes == self._remembered_lanes
+        ):
+            return data
+        return replace(
+            data,
+            map=replace(
+                data.map,
+                trace=replace(data.map.trace, lanes=self._remembered_lanes),
+            ),
+        )
 
     def _carry_forward_map_geometry(
         self, previous: MowerState | None, data: MowerState
@@ -895,33 +958,31 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
             if job["kind"] == JOB_KIND_EDGE_TRIM
             else JOB_KIND_MOWING
         )
-        record = MowerLastJob(
-            kind=kind,
-            started_at=job["started_at"].isoformat(),
-            ended_at=ended_at.isoformat(),
-            mowed_area=round(job["mowed_peak"], 1),
-            duration_minutes=round(elapsed_seconds / 60, 1),
-            task_id=job["task_id"],
-        )
+        started_at = job["started_at"]
         existing = data.last_jobs.get(kind)
         if (
             existing is not None
             and existing.task_id
-            and existing.task_id == record.task_id
+            and existing.task_id == job["task_id"]
+            and existing.started_at
         ):
-            # A recharge split this task into legs — extend the earlier ones.
-            record = replace(
-                record,
-                started_at=existing.started_at or record.started_at,
-                duration_minutes=round(
-                    (existing.duration_minutes or 0.0)
-                    + (record.duration_minutes or 0.0),
-                    1,
-                ),
-                mowed_area=max(
-                    existing.mowed_area or 0.0, record.mowed_area or 0.0
-                ),
-            )
+            # A recharge split this task into legs: the job began at the first
+            # of them, and the reported time covers everything since — the
+            # break included, which is what "how long did it take" means.
+            started_at = min(started_at, dt_util.parse_datetime(existing.started_at))
+        record = MowerLastJob(
+            kind=kind,
+            started_at=started_at.isoformat(),
+            ended_at=ended_at.isoformat(),
+            mowed_area=max(
+                round(job["mowed_peak"], 1),
+                (existing.mowed_area or 0.0) if existing else 0.0,
+            ),
+            duration_minutes=round(
+                (ended_at - started_at).total_seconds() / 60, 1
+            ),
+            task_id=job["task_id"],
+        )
         data = replace(data, last_jobs={**data.last_jobs, kind: record})
         self._map_history_store.async_delay_save(
             self._map_history_payload, MAP_HISTORY_STORE_DELAY_SECONDS

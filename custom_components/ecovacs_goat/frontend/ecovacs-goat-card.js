@@ -316,6 +316,19 @@ const STYLE = `
     stroke-width: 3;
     stroke-linejoin: round;
   }
+  /* Boundary already gone over by the edge lap. The app turns it white as
+     the mower works round; sampled straight from a screenshot of one. */
+  .map-lawn-outline-done {
+    stroke: #fcfcfc;
+  }
+  /* Edge lap still to drive, painted over the pale boundary. */
+  .map-border-pending {
+    fill: none;
+    stroke: #3e8e28;
+    stroke-width: 3;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
   .map-obstacle-edge {
     fill: #6f9c4e;
     stroke: #4b7a35;
@@ -980,6 +993,7 @@ class EcovacsGoatCard extends HTMLElement {
     ) {
       delete model.position_history;
       delete model.pending;
+      delete model.border;
     }
 
     const hasAttributes =
@@ -1003,6 +1017,7 @@ class EcovacsGoatCard extends HTMLElement {
       keep("obstacles", liveInfo.obstacles);
       keep("position_history", map.position_history);
       keep("pending", map.trace?.pending);
+      keep("border", map.trace?.border);
       keep("current_position", map.current_position);
       keep("charge_positions", map.charge_positions);
       keep("uwb_positions", map.uwb_positions);
@@ -1022,6 +1037,7 @@ class EcovacsGoatCard extends HTMLElement {
         model.zones?.length ||
         model.position_history?.length ||
         model.pending?.length ||
+        model.border?.length ||
         model.current_position ||
         model.rtk_station
     );
@@ -1032,6 +1048,7 @@ class EcovacsGoatCard extends HTMLElement {
       obstacles: model.obstacles,
       position_history: model.position_history,
       pending: model.pending,
+      border: model.border,
       current_position: model.current_position,
       charge_positions: model.charge_positions,
       uwb_positions: model.uwb_positions,
@@ -1064,6 +1081,7 @@ class EcovacsGoatCard extends HTMLElement {
       arraySig(resolved.obstacles),
       arraySig(resolved.position_history),
       resolved.pending?.length ?? 0,
+      resolved.border?.length ?? 0,
       JSON.stringify(resolved.current_position ?? null),
       arraySig(resolved.charge_positions),
       arraySig(resolved.uwb_positions),
@@ -1084,6 +1102,12 @@ class EcovacsGoatCard extends HTMLElement {
     // Each pending lane is its own segment: joining them would draw lines
     // across whatever lies between two lanes (a terrace, the house).
     const pending = (resolved.pending || [])
+      .map((segment) => this._positions(segment))
+      .filter((segment) => segment.length > 1);
+    // The edge lap has its own field: once mostly driven it shrinks to a
+    // straight run, so it cannot be told from a mowing lane by shape.
+    const pendingLanes = pending;
+    const pendingBorder = (resolved.border || [])
       .map((segment) => this._positions(segment))
       .filter((segment) => segment.length > 1);
     // Not drawn any more (the app shows no trail either), but the recent
@@ -1139,8 +1163,13 @@ class EcovacsGoatCard extends HTMLElement {
     // The border is drawn above the mowed lanes, like the app: lanes are
     // clipped at the boundary, so without this the dark line all but vanishes
     // once the edge pass paints over it.
+    // The edge lap runs along the boundary itself, so the boundary is always
+    // drawn in the "done" tone and whatever is still to cut is painted over
+    // it in green. The border therefore turns pale behind the mower and stays
+    // pale once the lap is finished, going green again only when a new job
+    // brings a fresh lap to drive — which is what the app shows.
     const lawnBorderMarkup = gardenPath
-      ? `<path class="map-lawn-outline" d="${gardenPath}"></path>`
+      ? `<path class="map-lawn-outline map-lawn-outline-done" d="${gardenPath}"></path>`
       : "";
     const laneClip = gardenPath ? ` clip-path="url(#${lawnClipId})"` : "";
     const obstacleMarkup = obstaclePaths
@@ -1173,16 +1202,19 @@ class EcovacsGoatCard extends HTMLElement {
       : "";
 
     // Dynamic layers: change on (almost) every position update.
-    const pendingPath = pending
-      .map((segment) =>
-        segment
-          .map((position, index) => {
-            const point = this._project(position, bounds, width, height);
-            return `${index ? "L" : "M"} ${point.x} ${point.y}`;
-          })
-          .join(" ")
-      )
-      .join(" ");
+    const segmentsToPath = (segments) =>
+      segments
+        .map((segment) =>
+          segment
+            .map((position, index) => {
+              const point = this._project(position, bounds, width, height);
+              return `${index ? "L" : "M"} ${point.x} ${point.y}`;
+            })
+            .join(" ")
+        )
+        .join(" ");
+    const pendingPath = segmentsToPath(pendingLanes);
+    const borderPath = segmentsToPath(pendingBorder);
     const currentPoint = current ? this._project(current, bounds, width, height) : null;
     const currentHeading = current
       ? this._mowerHeading(current, charge, recentPositions, mowerState)
@@ -1221,6 +1253,7 @@ class EcovacsGoatCard extends HTMLElement {
       beaconMarkup,
       rtkMarkup,
       pendingPath,
+      borderPath,
       laneClip,
       currentPoint,
       currentHeading,
@@ -1237,6 +1270,7 @@ class EcovacsGoatCard extends HTMLElement {
         ${render.obstacleMarkup}
         <path class="map-pending" data-layer="pending"${render.laneClip}${render.pendingPath ? ` d="${render.pendingPath}"` : ""}></path>
         ${render.lawnBorderMarkup}
+        <path class="map-border-pending" data-layer="border"${render.borderPath ? ` d="${render.borderPath}"` : ""}></path>
         ${render.stationMarkup}
         ${render.noGoMarkup}
         ${render.beaconMarkup}
@@ -1254,12 +1288,18 @@ class EcovacsGoatCard extends HTMLElement {
       return false;
     }
 
-    const pending = svg.querySelector('[data-layer="pending"]');
-    if (pending) {
-      if (render.pendingPath) {
-        pending.setAttribute("d", render.pendingPath);
+    for (const [layer, path] of [
+      ["pending", render.pendingPath],
+      ["border", render.borderPath],
+    ]) {
+      const element = svg.querySelector(`[data-layer="${layer}"]`);
+      if (!element) {
+        continue;
+      }
+      if (path) {
+        element.setAttribute("d", path);
       } else {
-        pending.removeAttribute("d");
+        element.removeAttribute("d");
       }
     }
 

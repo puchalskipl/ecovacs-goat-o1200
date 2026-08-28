@@ -245,7 +245,15 @@ def obstacles_from_area_info(
     return tuple(shapes)
 
 
-def parse_track_record(field: Any, *, step: int = CHAIN_STEP) -> tuple[str, tuple[tuple[MapPosition, ...], ...]] | None:
+class TrackRecord(NamedTuple):
+    """One lane record: its id, its segments, and how it was encoded."""
+
+    lane_id: str
+    segments: tuple[tuple[MapPosition, ...], ...]
+    is_chain: bool
+
+
+def parse_track_record(field: Any, *, step: int = CHAIN_STEP) -> TrackRecord | None:
     """Parse one ``onMapTrack`` field into a lane id and its segments.
 
     The mower plans a job as numbered lanes and reports **what is still left
@@ -263,8 +271,8 @@ def parse_track_record(field: Any, *, step: int = CHAIN_STEP) -> tuple[str, tupl
       border lap that follows the lawn edge.
 
     A field with an id but no coordinates means that lane is finished.
-    Returns ``(lane_id, segments)`` with an empty tuple for a finished lane,
-    or None when the field is not a lane record.
+    Returns the record with an empty ``segments`` for a finished lane, or None
+    when the field is not a lane record.
     """
     if not isinstance(field, str):
         return None
@@ -273,19 +281,19 @@ def parse_track_record(field: Any, *, step: int = CHAIN_STEP) -> tuple[str, tupl
         return None
     subtype, lane_id, rest = parts[1], parts[2], parts[3:]
     if not rest:
-        return lane_id, ()
+        return TrackRecord(lane_id, (), subtype == "2")
 
     if subtype == "2":
         anchor_text, *chain_parts = rest
         if "," not in anchor_text or not chain_parts:
-            return lane_id, ()
+            return TrackRecord(lane_id, (), True)
         x_text, y_text, *_ = anchor_text.split(",")
         try:
             anchor = MapPosition(x=int(x_text), y=int(y_text))
         except ValueError:
             return None
         shape = decode_chain_shape(anchor, chain_parts[0], step=step)
-        return lane_id, ((shape,) if len(shape) >= 2 else ())
+        return TrackRecord(lane_id, (shape,) if len(shape) >= 2 else (), True)
 
     points: list[MapPosition] = []
     for token in rest:
@@ -301,7 +309,7 @@ def parse_track_record(field: Any, *, step: int = CHAIN_STEP) -> tuple[str, tupl
     segments = tuple(
         (points[i], points[i + 1]) for i in range(0, len(points) - 1, 2)
     )
-    return lane_id, segments
+    return TrackRecord(lane_id, segments, False)
 
 
 def stabilise_geometry(

@@ -947,25 +947,40 @@ def _map_track_push(current: MowerMap, data: dict[str, Any]) -> MowerMap:
 
     step = current.info.chain_step or CHAIN_STEP
     lanes = dict(current.trace.lanes)
+    border = current.trace.border
     touched = False
     for record in decoded:
         if not isinstance(record, list) or len(record) < 2:
             continue
         snapshot = record[1] == TRACK_SNAPSHOT
         seen: dict[str, tuple[tuple[MapPosition, ...], ...]] = {}
+        seen_border: tuple[tuple[MapPosition, ...], ...] = ()
         for field in record[2:]:
             parsed = parse_track_record(field, step=step)
             if parsed is None:
                 continue
-            lane_id, segments = parsed
+            if parsed.is_chain:
+                # For the border lap the mower sends two different things
+                # under one id: the whole remaining loop in a snapshot, and
+                # a few cells around wherever it is right now in the updates
+                # between them. Only the snapshot describes work left to do;
+                # taking the updates too makes the border flicker between the
+                # full loop and a stub at the mower.
+                if snapshot:
+                    touched = True
+                    seen_border = parsed.segments
+                continue
             touched = True
-            if segments:
-                seen[lane_id] = segments
+            if parsed.segments:
+                seen[parsed.lane_id] = parsed.segments
             else:
-                lanes.pop(lane_id, None)
-        if snapshot and seen:
-            # Authoritative: whatever is not in the snapshot is already cut.
-            lanes = seen
+                lanes.pop(parsed.lane_id, None)
+        if snapshot:
+            # Authoritative: whatever is not in the snapshot is already cut,
+            # including the edge lap once it stops being listed.
+            if seen:
+                lanes = seen
+            border = seen_border
         else:
             lanes.update(seen)
     if not touched:
@@ -976,6 +991,7 @@ def _map_track_push(current: MowerMap, data: dict[str, Any]) -> MowerMap:
         trace=replace(
             current.trace,
             lanes=lanes,
+            border=border,
             batch_id=data.get("batid") or current.trace.batch_id,
             serial=str(data.get("serial")) if data.get("serial") else current.trace.serial,
             info_size=_int(data.get("infoSize")) or current.trace.info_size,
