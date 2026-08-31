@@ -157,6 +157,23 @@ class MowerSettings:
     area_parameters: tuple[AreaParameter, ...] = ()
 
 
+def standstill_bucket(*, mowing: bool, blocked: bool, charging: bool) -> str | None:
+    """Say what a stretch of an open job's time should be charged to.
+
+    ``None`` means the mower was cutting, so it counts as working time.
+    ``blocked`` wins over ``charging`` when both hold: during a rain break the
+    mower tops its battery up, but what the job is waiting for is the weather,
+    and charging the stretch to both buckets would overstate the standstill.
+    """
+    if mowing:
+        return None
+    if blocked:
+        return "blocked"
+    if charging:
+        return "charging"
+    return None
+
+
 @dataclass(frozen=True)
 class MowerLastJob:
     """Summary of the most recently finished job of one kind.
@@ -172,6 +189,13 @@ class MowerLastJob:
     mowed_area: float | None = None
     duration_minutes: float | None = None
     task_id: str | None = None
+    # Of ``duration_minutes``, how long the mower stood still rather than
+    # cutting. A wet afternoon can put five hours of waiting into an
+    # eight-hour "mowing", so the total alone says more about the weather
+    # than about the work. Blocked wins over charging when both are true:
+    # what held the job up was the rain, not the battery.
+    blocked_minutes: float | None = None
+    charging_minutes: float | None = None
 
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable payload for persistence."""
@@ -182,6 +206,8 @@ class MowerLastJob:
             "mowed_area": self.mowed_area,
             "duration_minutes": self.duration_minutes,
             "task_id": self.task_id,
+            "blocked_minutes": self.blocked_minutes,
+            "charging_minutes": self.charging_minutes,
         }
 
     @classmethod
@@ -200,6 +226,8 @@ class MowerLastJob:
             mowed_area=_num(payload.get("mowed_area")),
             duration_minutes=_num(payload.get("duration_minutes")),
             task_id=str(payload["task_id"]) if payload.get("task_id") else None,
+            blocked_minutes=_num(payload.get("blocked_minutes")),
+            charging_minutes=_num(payload.get("charging_minutes")),
         )
 
 

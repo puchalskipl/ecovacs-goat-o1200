@@ -659,3 +659,73 @@ def test_o_series_map_state_learns_mid_without_decoding() -> None:
     assert state.map.mid == "987654"
     assert state.map.info.outline == ()
     assert state.map.trace.path == ()
+
+
+def test_a_chunked_map_track_push_is_assembled_before_decoding() -> None:
+    """getMapTrack answers with the full plan, split into chunks when large.
+
+    Observed live 2026-08-31: a mowing plan (~7 kB, 180+ lane fields) always
+    ships as serial="2" with index 0 and 1 under one batid — and the handler
+    dropped anything it could not decode from a single message, so the plan
+    never appeared for a mow while the small single-chunk trim loop worked.
+    The chunks join as base64 BEFORE the LZMA decode.
+    """
+    record = [
+        "1",
+        "1",
+        "1;1;7;0,0;-100,0,-100,400",
+        "1;1;8;0,0;-200,0,-200,400",
+        "1;2;0;-300,0;2(8)44(8)66(8)8",
+    ]
+    whole = _make_subset(record and [record])
+    half = len(whole) // 2
+    parts = [whole[:half], whole[half:]]
+
+    state = MowerState()
+    for index, info in enumerate(parts):
+        state = apply_command_data(
+            state,
+            "onMapTrack",
+            {
+                "mid": "0",
+                "batid": "abc123",
+                "serial": "2",
+                "index": str(index),
+                "info": info,
+            },
+        )
+        if index == 0:
+            # Half a plan decodes to nothing: buffered, not applied.
+            assert state.map.trace.lanes == {}
+            assert state.map.trace.chunks
+
+    assert set(state.map.trace.lanes) == {"7", "8"}
+    assert state.map.trace.border is not None
+    assert state.map.trace.chunks == {}
+
+
+def test_chunks_from_different_batches_do_not_mix() -> None:
+    """A new batid restarts assembly instead of joining unrelated parts."""
+    record = [["1", "1", "1;1;5;0,0;-100,0,-100,400"]]
+    whole = _make_subset(record)
+    half = len(whole) // 2
+
+    state = MowerState()
+    state = apply_command_data(
+        state,
+        "onMapTrack",
+        {"batid": "old", "serial": "2", "index": "0", "info": whole[:half]},
+    )
+    # The second half never arrives; a fresh batch starts over.
+    state = apply_command_data(
+        state,
+        "onMapTrack",
+        {"batid": "new", "serial": "2", "index": "0", "info": whole[:half]},
+    )
+    assert state.map.trace.lanes == {}
+    state = apply_command_data(
+        state,
+        "onMapTrack",
+        {"batid": "new", "serial": "2", "index": "1", "info": whole[half:]},
+    )
+    assert set(state.map.trace.lanes) == {"5"}

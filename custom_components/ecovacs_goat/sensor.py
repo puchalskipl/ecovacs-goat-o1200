@@ -244,10 +244,25 @@ def _last_job_attributes(state: MowerState, kind: str) -> dict[str, Any] | None:
     job = state.last_jobs.get(kind)
     if job is None:
         return None
+    working = job.duration_minutes
+    if working is not None:
+        working = round(
+            max(
+                0.0,
+                working - (job.blocked_minutes or 0.0) - (job.charging_minutes or 0.0),
+            ),
+            1,
+        )
     return {
         "started_at": job.started_at,
         "mowed_area_m2": job.mowed_area,
         "duration_minutes": job.duration_minutes,
+        # Of the total: standing still because a protection held the job up,
+        # standing still on the dock to recharge, and the rest — time the
+        # mower was actually cutting.
+        "blocked_minutes": job.blocked_minutes,
+        "charging_minutes": job.charging_minutes,
+        "working_minutes": working,
         "task_id": job.task_id,
     }
 

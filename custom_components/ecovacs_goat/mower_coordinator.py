@@ -55,6 +55,7 @@ from .mower_models import (
     MowerMapInfo,
     MowerMapTrace,
     MowerState,
+    standstill_bucket,
 )
 from .mower_mqtt import MowerAppPresenceMqttClient, MowerMqttClient
 
@@ -293,6 +294,9 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
         self._live_position_keepalive_force = False
         self._app_presence_stop_task: asyncio.Task[None] | None = None
         self._app_presence_stop_at: float | None = None
+        # When the presence session was last cycled (see
+        # _schedule_app_presence_cycle) — guards against restart storms.
+        self._app_presence_cycled_at: float | None = None
         self._startup_live_map_task: asyncio.Task[None] | None = None
         self._availability_watchdog_task: asyncio.Task[None] | None = None
         self._last_live_position_stream_request_at: float | None = None
@@ -937,6 +941,39 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
             return data
         return replace(data, map=replace(data.map, info=info))
 
+    def _sample_job_standstill(self, job: dict[str, Any], data: MowerState) -> None:
+        """Charge the time since the last sample to what is holding the job up.
+
+        Sampled rather than event-driven: state is republished every few
+        seconds while a job is open, which is far finer than the minutes this
+        ends up reporting. ``blocked`` wins over ``charging`` when both hold —
+        during a rain break the mower tops up its battery, but what the job is
+        waiting for is the weather.
+        """
+        now = dt_util.utcnow()
+        previous_sample = job.get("sampled_at") or now
+        job["sampled_at"] = now
+        elapsed = (now - previous_sample).total_seconds()
+        if elapsed <= 0:
+            return
+        protections = data.protections
+        bucket = standstill_bucket(
+            mowing=data.activity is MowerActivity.MOWING,
+            blocked=any(
+                (
+                    protections.rain_active,
+                    protections.rain_delay_active,
+                    protections.animal_active,
+                    protections.emergency_stop,
+                    protections.locked,
+                )
+            ),
+            charging=bool(data.charging),
+        )
+        if bucket is not None:
+            key = f"{bucket}_seconds"
+            job[key] = job.get(key, 0.0) + elapsed
+
     def _track_job_lifecycle(
         self, previous: MowerState | None, data: MowerState
     ) -> MowerState:
@@ -963,7 +1000,20 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
                     "started_at": dt_util.utcnow(),
                     "task_id": data.task_id,
                     "mowed_peak": 0.0,
+                    "blocked_seconds": 0.0,
+                    "charging_seconds": 0.0,
+                    "sampled_at": dt_util.utcnow(),
                 }
+                # A fresh job needs a fresh app-presence CONNECT: the mower
+                # broadcasts its plan (onMI/onArI + onMapTrack snapshots)
+                # when it sees the app come online — the connect edge, not
+                # the connected state. A session left open from before the
+                # job produces no edge and the plan never arrives (observed:
+                # a whole 78-minute mowing leg with zero snapshots, while
+                # every edge trim — whose start coincided with a presence
+                # reconnect — got its first snapshot within seconds of
+                # app_presence_mqtt_connected).
+                self._schedule_app_presence_cycle("job_started")
             if job is not None:
                 if data.clean_type:
                     job["kind"] = data.clean_type
@@ -973,6 +1023,7 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
                     job["mowed_peak"] = max(
                         job["mowed_peak"], data.stats.area / 10000
                     )
+                self._sample_job_standstill(job, data)
             return data
 
         if job is None:
@@ -983,12 +1034,19 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
             # clean-state push while the mower parks to recharge. Closing here
             # recorded a mid-job "last mowing" and fired the edge-trim
             # automation while the mower was still busy.
+            self._sample_job_standstill(job, data)
             return data
         self._active_job = None
         ended_at = dt_util.utcnow()
         elapsed_seconds = (ended_at - job["started_at"]).total_seconds()
-        if elapsed_seconds < LAST_JOB_MIN_SECONDS and not job["mowed_peak"]:
-            # Aborted start (protection bounce / command error) — not a job.
+        if elapsed_seconds < LAST_JOB_MIN_SECONDS:
+            # Aborted start (protection bounce, command error, a job stopped
+            # seconds in) — not a job. The reported area cannot vouch for it:
+            # the mower's session counter carries over from the previous run,
+            # so a five-second edge trim was recorded with the full 15.7 m² of
+            # the one before it (observed 2026-08-30) and then suppressed the
+            # next scheduled trim for the whole interval. At the mower's
+            # 0.35–0.5 m/s nothing meaningful is cut in under a minute anyway.
             return data
 
         kind = (
@@ -1008,6 +1066,19 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
             # of them, and the reported time covers everything since — the
             # break included, which is what "how long did it take" means.
             started_at = min(started_at, dt_util.parse_datetime(existing.started_at))
+        # Legs of one task carry their own standstill; the record reports the
+        # whole task, so they add up (unlike the area, which the mower already
+        # reports cumulatively).
+        merged_leg = (
+            existing is not None
+            and existing.task_id
+            and existing.task_id == job["task_id"]
+        )
+        blocked = job.get("blocked_seconds", 0.0) / 60
+        charging = job.get("charging_seconds", 0.0) / 60
+        if merged_leg:
+            blocked += existing.blocked_minutes or 0.0
+            charging += existing.charging_minutes or 0.0
         record = MowerLastJob(
             kind=kind,
             started_at=started_at.isoformat(),
@@ -1020,6 +1091,8 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
                 (ended_at - started_at).total_seconds() / 60, 1
             ),
             task_id=job["task_id"],
+            blocked_minutes=round(blocked, 1),
+            charging_minutes=round(charging, 1),
         )
         data = replace(data, last_jobs={**data.last_jobs, kind: record})
         self._map_history_store.async_delay_save(
@@ -1399,6 +1472,18 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
                         self.async_set_updated_data(
                             self._compact_live_position_segment(state)
                         )
+                        # Safety net for the plan broadcast: a running job
+                        # whose map still has no plan (a lone lane, no border
+                        # announcement) means the connect edge was missed —
+                        # produce another one. Rate-limited to one cycle per
+                        # two minutes, so the tail of a job (where the plan
+                        # legitimately dwindles) costs a no-op at worst.
+                        if (
+                            state.activity is MowerActivity.MOWING
+                            and len(state.map.trace.lanes) <= 1
+                            and state.map.trace.border_template is None
+                        ):
+                            self._schedule_app_presence_cycle("plan_missing")
                     except EcovacsApiError as err:
                         _LOGGER.debug("ECOVACS live position keepalive failed: %s", err)
                         self._capture_event(
@@ -1573,6 +1658,34 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
             },
         )
         return state
+
+    def _schedule_app_presence_cycle(self, reason: str) -> None:
+        """Restart the app-presence session to produce a fresh connect edge."""
+        now = monotonic()
+        if (
+            self._app_presence_cycled_at is not None
+            and now - self._app_presence_cycled_at < 120
+        ):
+            return
+        self._app_presence_cycled_at = now
+        self._create_background_task(
+            self._async_cycle_app_presence_mqtt(reason),
+            "ecovacs_goat_app_presence_cycle",
+        )
+
+    async def _async_cycle_app_presence_mqtt(self, reason: str) -> None:
+        """Stop and restart the app-presence MQTT session.
+
+        The official app produces this edge naturally by being opened; the
+        mower answers it by broadcasting the full plan of the running job.
+        """
+        try:
+            await self._app_presence_mqtt.stop()
+        except Exception as err:  # noqa: BLE001 - experimental side channel only
+            _LOGGER.debug("ECOVACS app-presence MQTT stop failed: %s", err)
+        await asyncio.sleep(1.0)
+        await self._async_keep_app_presence_mqtt(reason)
+        self._capture_event("app_presence_mqtt_cycled", {"reason": reason})
 
     async def _async_keep_app_presence_mqtt(self, reason: str) -> None:
         """Keep the captured official-app presence session alive for visible cards."""

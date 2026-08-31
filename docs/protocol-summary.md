@@ -85,6 +85,17 @@ The record's **second element** says what the push is:
   a snapshot must **replace** the known set, not merge into it.
 * `"2"` — an **update** to individual lanes.
 
+**The snapshot is the answer to `getMapTrack`, and it arrives in chunks.**
+`getMapTrack` returns a bare `code 0, msg ok` over HTTP — the plan follows as
+an `onMapTrack` push, split when it outgrows one message: `serial` is the
+number of parts, `index` the part number, `batid` ties them together. The
+parts are **base64 fragments of one LZMA stream**: they must be concatenated
+in `index` order *before* decoding — decoding a part on its own fails. A
+mowing plan (~7 kB, 180+ lane fields) always ships as `serial: "2"`; the
+much smaller edge-lap loop fits in one message, which is why an integration
+that ignores multi-chunk pushes shows the plan for edge trims but never for
+a mow (diagnosed 2026-08-31 after two sessions with zero visible plan).
+
 Each field is `<type>;<subtype>;<id>;<data>`:
 
 * subtype `"1"` — straight lanes as coordinates **in pairs**; each pair is one
@@ -92,7 +103,18 @@ Each field is `<type>;<subtype>;<id>;<data>`:
   Joining lanes into one polyline draws lines across whatever lies between
   them (a terrace, the house).
 * subtype `"2"` — a chain-coded shape: the **border lap** that follows the lawn
-  edge, which is the "edge finishing" pass at the end of a mow.
+  edge, which is the "edge finishing" pass at the end of a mow. It is
+  announced **closed** (first and last cell meet) before the mower starts
+  driving it; from then on each snapshot carries only the **arc from the
+  loop's fixed origin to the mower's front**. The stretch beyond the origin —
+  which the mower cuts last, finishing where it began — is **never
+  transmitted**, so a consumer that draws the arc alone leaves the final
+  quarter of the lawn unpainted. Keep the closed announcement as a template
+  and append the missing tail (see `map_geometry.compose_border`). Because
+  the chain and the outline come from different sources and drift a cell or
+  two apart (worse further from the anchor), the app does not draw the chain
+  itself — it recolours the lawn boundary by progress, and so should the
+  card.
 * a field with an id but no coordinates means that lane is finished.
 
 Dead ends, so nobody retries them:
@@ -125,6 +147,15 @@ Dead ends, so nobody retries them:
   `workComplete`, `alert`. The reference mower resumes at **80%** battery.
 - `getBreakPointStatus.continueLeftTime` reads 0 even mid-interruption; it is
   not a countdown to resuming.
+- The mower re-broadcasts its map geometry (`onMI`, `onArI`) when it sees the
+  **app-presence MQTT session connect** — the connect edge, not the connected
+  state. Opening the official app produces that edge naturally; an integration
+  holding a session open from before the job produces none. Cycling the
+  presence session at job start reproduces it.
+- `clean` acts (`start` / `resume` / `pause` / `stop`) are matched against the
+  **currently open job type**: an act whose `content.type` does not match is
+  answered `code 0, msg ok` and **silently ignored**. A stop typed `auto`
+  cannot end a `borderrotate` job; the type of the running job must be sent.
 - `setChildLock` is accepted but ignored by the O1200 firmware.
 - When a start is blocked (rain / animal protection), the mower accepts the
   command, drives for ~5 s, and returns on its own — that is not an error.

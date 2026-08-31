@@ -178,8 +178,15 @@ async def test_authenticate_rotates_stored_session_via_check_login() -> None:
 
 
 @pytest.mark.asyncio
-async def test_authenticate_keeps_session_on_transient_check_login_error() -> None:
-    """A non-auth checkLogin failure must not discard the private session."""
+async def test_authenticate_falls_back_to_password_on_any_session_error() -> None:
+    """A failing stored-session refresh must not block the password login.
+
+    Observed live 2026-08-31: a session invalidated server-side (another
+    client logged in with the same device id) failed checkLogin with a code
+    not classified as definitive, and re-raising took the whole integration
+    down although the password was fine. The session itself is kept — only a
+    definitive failure discards it — but the password fallback always runs.
+    """
     persisted = AsyncMock()
     existing = AccountSession(user_id="uid-long", access_token="access-1")
     api = _api(
@@ -187,14 +194,18 @@ async def test_authenticate_keeps_session_on_transient_check_login_error() -> No
         account_session_update_callback=persisted,
     )
     api._check_login = AsyncMock(side_effect=EcovacsAuthError("auth call failed"))
-    api._login_password = AsyncMock(side_effect=AssertionError("password login"))
+    api._login_password = AsyncMock(
+        return_value={"uid": "uid-long", "accessToken": "access-2"}
+    )
+    api._complete_login = AsyncMock(return_value=object())
 
-    with pytest.raises(EcovacsAuthError, match="auth call failed"):
-        await api.authenticate()
+    await api.authenticate()
 
-    api._login_password.assert_not_called()
-    persisted.assert_not_called()
-    assert api.account_session == existing
+    api._login_password.assert_called_once()
+    # The stored session survives a non-definitive failure; the fresh login
+    # then replaces it with the new one.
+    assert api.account_session is not None
+    assert api.account_session.access_token == "access-2"
 
 
 @pytest.mark.asyncio

@@ -50,7 +50,10 @@ The goal is to keep communication with the mower conservative: use pushed update
 - Start or resume mowing, stop mowing, and return to dock.
 - Battery, error, Wi-Fi, current mow, total mow, and consumable sensors.
 - Settings for cutting height, rain delay, animal protection, AI recognition, edge mowing, warning switches, cut direction, mowing efficiency, obstacle avoidance, and speaker volumes.
-- Edge trimming (the app's border-cut job) as its own button.
+- Edge trimming (the app's border-cut job) as its own button. Note the mower's
+  own semantics: **stop ends a job for good** (its progress is abandoned and
+  the play button then starts a *new* mow), while **pause** is the resumable
+  interruption — resume picks the same job back up, edge trim included.
 - Timestamps and summaries of the last mowing and the last edge trim, including how long the job took from start to finish (mid-job recharges included) — the mower keeps no dated history of its own, so the integration tracks jobs itself and persists one in progress so a Home Assistant restart does not reset the clock.
 - Why the mower is doing what it is doing: `pause_reason` and `resumes_automatically` on the lawn mower entity tell a mid-job recharge (which carries on by itself) apart from a pause somebody pressed, and `charging` comes straight from the mower rather than being guessed.
 - Optional Lovelace card that draws the mower's own map the way the app does: lawn outline, obstacles, the lanes still to be cut, dock, and mower.
@@ -131,6 +134,10 @@ The integration tries to be conservative with the mower and cloud connection:
 - It prefers live updates pushed by ECOVACS over MQTT.
 - It refreshes grouped state at startup and after meaningful MQTT changes (with a short debounced readback).
 - It avoids broad background polling loops.
+- Commands name the job they act on. The mower matches a `clean` act against
+  the job currently open and **silently ignores a mismatch** (answering `ok`),
+  so stop/pause/resume carry the running job's type — otherwise an edge trim
+  cannot be stopped from Home Assistant.
 - Map geometry and the remaining-work lanes only ever change on the mower's own pushes. A grouped refresh assembles its result from a snapshot taken seconds earlier, so publishing it verbatim would make those layers flicker between the new picture and the old one.
 - Decoded geometry is persisted and versioned: after a decoder change the stored shapes are dropped and refetched rather than drawn wrong.
 
@@ -152,8 +159,18 @@ picture the official app does, from four layers:
    reports what is left on each of them (`onMapTrack`), shrinking them as it
    works. The card hatches those over the lawn and they disappear lane by
    lane, exactly as the app does. The lanes are separate segments, never
-   joined into one path. The same layer carries the **border lap** — the edge
-   finishing pass — as a chain-coded shape.
+   joined into one path. The full plan arrives as the answer to `getMapTrack`
+   and, for a mow, is **split across two messages** that must be joined before
+   they decode — an integration that ignores multi-part pushes shows a plan
+   for edge trims but never for a mow.
+
+   The same layer carries the **border lap** — the edge finishing pass. The
+   mower announces the lap closed, then reports only the arc from the loop's
+   fixed origin to its own front; the stretch it cuts last is never sent, so
+   the integration keeps the announcement as a template and completes the
+   remainder from it. The card does not draw that chain directly (it drifts a
+   cell or two from the outline): like the app, it recolours the lawn boundary
+   by progress — green for still to edge, white for done.
 4. **Mower and dock** — the mower marker from `onPos`, the dock at the origin
    `(0, 0)`; the dock *is* the coordinate frame's origin, so a docked mower
    legitimately reports `(0, 0)`.
@@ -203,6 +220,18 @@ Do not share passwords, access tokens, device IDs, or private network details pu
 - If entities are unknown after setup, press **Refresh state** once the mower is online.
 - If commands fail, check whether the official ECOVACS app can still control the mower.
 - If both Home Assistant and the official app lose contact with the mower, stop testing and recover the mower first.
+- **"Invalid ECOVACS credentials" although the password is right.** The account
+  session is tied to the client device id the integration registered. Logging
+  in elsewhere with that same id (a script reusing it, a second Home Assistant
+  restored from a backup) invalidates the stored session. Reauthenticate from
+  **Settings → Devices & services → Ecovacs GOAT O1200 → Configure →
+  Re-authenticate account**, and do not reuse the integration's device id
+  outside Home Assistant.
+- **The map shows no plan while mowing** (a lone lane, no hatching). The plan
+  is broadcast when the mower sees a fresh app-style session connect; it is
+  re-requested automatically at the start of every job, but you can force one
+  with `ecovacs_goat.request_live_position_stream` or simply by opening the
+  official app once.
 - When opening an issue, include the integration version, mower model, Home Assistant logs, and the action that failed.
 
 ## Safety

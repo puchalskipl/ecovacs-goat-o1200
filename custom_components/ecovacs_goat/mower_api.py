@@ -228,10 +228,16 @@ class EcovacsMowerApi:
                     )
                     return self._credentials
                 except EcovacsAuthError as err:
+                    # Whatever the stored session's refresh died of, the
+                    # password login below is still worth a try: a session
+                    # invalidated server-side (e.g. another client logged in
+                    # with this device id) used to fail here with a code we
+                    # do not classify as definitive, and re-raising took the
+                    # whole integration down although the password was fine
+                    # (observed live 2026-08-31). Only a definitive failure
+                    # discards the stored session.
                     if _is_definitive_auth_failure(err):
                         await self._async_set_account_session(None)
-                    else:
-                        raise
 
             login_resp = await self._login_password()
             account_session = _parse_account_session(login_resp, "login")

@@ -276,3 +276,73 @@ def test_a_restart_mid_job_must_not_reset_the_clock() -> None:
 
     assert restored["started_at"] == started
     assert restored["task_id"] == "-8518531"
+
+
+def test_a_weather_break_is_not_counted_as_charging_too() -> None:
+    """Exercises mower_models.standstill_bucket.
+
+    Observed live 2026-08-31: a mow ran 10:29-18:39 (490 min) of which the
+    mower spent 341 min waiting out rain — parked on the dock, so charging
+    part of that time as well. Reporting the stretch under both headings
+    would claim more standstill than the job even lasted, so blocked wins.
+    """
+    from custom_components.ecovacs_goat.mower_models import standstill_bucket
+
+    # Cutting: working time, whatever else is true.
+    assert standstill_bucket(mowing=True, blocked=False, charging=False) is None
+    assert standstill_bucket(mowing=True, blocked=True, charging=True) is None
+
+    # The rain break: parked and charging, but the weather is what holds it.
+    assert (
+        standstill_bucket(mowing=False, blocked=True, charging=True) == "blocked"
+    )
+    assert (
+        standstill_bucket(mowing=False, blocked=True, charging=False) == "blocked"
+    )
+
+    # A plain mid-job recharge.
+    assert (
+        standstill_bucket(mowing=False, blocked=False, charging=True) == "charging"
+    )
+
+    # Paused by hand off the dock: neither bucket, it stays working time.
+    assert standstill_bucket(mowing=False, blocked=False, charging=False) is None
+
+
+def test_the_reported_split_never_exceeds_the_job() -> None:
+    """The three parts of a duration add up to it, and none goes negative."""
+    from custom_components.ecovacs_goat.mower_models import MowerLastJob
+
+    # The real 2026-08-31 mow, rounded as the coordinator stores it.
+    job = MowerLastJob(
+        kind="auto",
+        duration_minutes=489.7,
+        blocked_minutes=341.0,
+        charging_minutes=0.0,
+    )
+    working = round(
+        max(
+            0.0,
+            job.duration_minutes
+            - (job.blocked_minutes or 0.0)
+            - (job.charging_minutes or 0.0),
+        ),
+        1,
+    )
+    assert working == 148.7
+    assert working + job.blocked_minutes + job.charging_minutes == job.duration_minutes
+
+    # A record from before this field existed must not compute a negative.
+    stary = MowerLastJob(kind="auto", duration_minutes=20.0)
+    assert (
+        round(
+            max(
+                0.0,
+                stary.duration_minutes
+                - (stary.blocked_minutes or 0.0)
+                - (stary.charging_minutes or 0.0),
+            ),
+            1,
+        )
+        == 20.0
+    )

@@ -918,6 +918,14 @@ def _map_set_layer(current: MowerMap, data: dict[str, Any]) -> MowerMap:
     return new
 
 
+def _as_int(value: Any, *, default: int) -> int:
+    """Parse the mower's stringly-typed counters (``serial``/``index``)."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _decode_map_subset(value: Any) -> Any:
     """Decode an O-series ``subsets`` blob (base64 + compact LZMA) to JSON."""
     if not isinstance(value, str) or not value:
@@ -941,8 +949,39 @@ def _map_track_push(current: MowerMap, data: dict[str, Any]) -> MowerMap:
 
     This is the layer the official app hatches over the lawn and rubs out
     piece by piece; it is not a record of where the mower has driven.
+
+    A ``getMapTrack`` request is answered with the FULL plan as one of these
+    pushes, split into chunks when it outgrows a single message (``serial``
+    is the chunk count, ``index`` the chunk number, ``batid`` ties the parts
+    together; the LZMA stream only decodes once the base64 parts are joined
+    in order). A mowing plan (~7 kB, 180+ lane fields) always ships in two
+    chunks — dropping multi-chunk pushes was why the plan never appeared for
+    a mow while the small single-chunk trim loop worked from day one.
     """
-    decoded = _decode_map_subset(data.get("info"))
+    info = data.get("info")
+    serial = _as_int(data.get("serial"), default=1)
+    if serial > 1:
+        batid = str(data.get("batid") or "")
+        index = _as_int(data.get("index"), default=0)
+        chunks = (
+            dict(current.trace.chunks)
+            if current.trace.batch_id == batid
+            else {}
+        )
+        if isinstance(info, str):
+            chunks[index] = info
+        if len(chunks) < serial:
+            return replace(
+                current,
+                trace=replace(current.trace, batch_id=batid, chunks=chunks),
+            )
+        info = "".join(chunks[i] for i in sorted(chunks))
+        current = replace(
+            current,
+            trace=replace(current.trace, batch_id=batid, chunks={}),
+        )
+
+    decoded = _decode_map_subset(info)
     if not isinstance(decoded, list):
         return current
 
