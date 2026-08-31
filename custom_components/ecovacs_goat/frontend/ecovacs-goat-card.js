@@ -1014,10 +1014,12 @@ class EcovacsGoatCard extends HTMLElement {
       };
 
       keep("outline", liveInfo.outline);
+      keep("chainStep", liveInfo.chain_step);
       keep("obstacles", liveInfo.obstacles);
       keep("position_history", map.position_history);
       keep("pending", map.trace?.pending);
       keep("border", map.trace?.border);
+      keep("borderMowing", map.border_mowing_enabled);
       keep("current_position", map.current_position);
       keep("charge_positions", map.charge_positions);
       keep("uwb_positions", map.uwb_positions);
@@ -1045,10 +1047,12 @@ class EcovacsGoatCard extends HTMLElement {
     return {
       available: hasAttributes || hasGeometry,
       outline: model.outline,
+      chainStep: model.chainStep,
       obstacles: model.obstacles,
       position_history: model.position_history,
       pending: model.pending,
       border: model.border,
+      borderMowing: model.borderMowing,
       current_position: model.current_position,
       charge_positions: model.charge_positions,
       uwb_positions: model.uwb_positions,
@@ -1110,6 +1114,15 @@ class EcovacsGoatCard extends HTMLElement {
     const pendingBorder = (resolved.border || [])
       .map((segment) => this._positions(segment))
       .filter((segment) => segment.length > 1);
+    // Border states: null = no plan snapshot yet, so during a job the whole
+    // lap is still ahead of the mower; [] = the lap is done; a list = this
+    // much remains. Off the job nothing is pending, whatever the field says.
+    const jobRunning = mowerState === "mowing" || mowerState === "paused";
+    const borderUnknown = resolved.border == null;
+    // With the mower's "border switch" off, no edge lap is coming at all, so
+    // an unknown border must not paint the ring green. Missing information
+    // counts as enabled — that is the mower's factory default.
+    const borderMowingEnabled = resolved.borderMowing !== false;
     // Not drawn any more (the app shows no trail either), but the recent
     // positions still tell us which way the mower is pointing when its own
     // heading is missing.
@@ -1163,13 +1176,16 @@ class EcovacsGoatCard extends HTMLElement {
     // The border is drawn above the mowed lanes, like the app: lanes are
     // clipped at the boundary, so without this the dark line all but vanishes
     // once the edge pass paints over it.
-    // The edge lap runs along the boundary itself, so the boundary is always
-    // drawn in the "done" tone and whatever is still to cut is painted over
-    // it in green. The border therefore turns pale behind the mower and stays
-    // pale once the lap is finished, going green again only when a new job
-    // brings a fresh lap to drive — which is what the app shows.
+    // The boundary's colour tells the edge-lap story: white is "edged", green
+    // is "still to edge". At rest it is white (the lap was done last job).
+    // While a job runs and no snapshot has told us otherwise, the whole lap is
+    // ahead of the mower, so the whole ring is green; once snapshots flow,
+    // only the remaining part stays green and it shrinks behind the mower.
+    const wholeLapAhead = jobRunning && borderUnknown && borderMowingEnabled;
     const lawnBorderMarkup = gardenPath
-      ? `<path class="map-lawn-outline map-lawn-outline-done" d="${gardenPath}"></path>`
+      ? `<path class="map-lawn-outline${
+          wholeLapAhead ? "" : " map-lawn-outline-done"
+        }" d="${gardenPath}"></path>`
       : "";
     const laneClip = gardenPath ? ` clip-path="url(#${lawnClipId})"` : "";
     const obstacleMarkup = obstaclePaths
@@ -1214,7 +1230,15 @@ class EcovacsGoatCard extends HTMLElement {
         )
         .join(" ");
     const pendingPath = segmentsToPath(pendingLanes);
-    const borderPath = segmentsToPath(pendingBorder);
+    // Off the job nothing is pending: the composed remainder (arc + template
+    // tail) is never empty, so without this gate the ring stayed dark green
+    // while the mower sat docked. At rest the boundary is plain white, like
+    // the app.
+    const borderPath = segmentsToPath(
+      jobRunning
+        ? this._snapBorderToOutline(garden, pendingBorder, resolved.chainStep)
+        : []
+    );
     const currentPoint = current ? this._project(current, bounds, width, height) : null;
     const currentHeading = current
       ? this._mowerHeading(current, charge, recentPositions, mowerState)
@@ -1495,6 +1519,125 @@ class EcovacsGoatCard extends HTMLElement {
         fill="freeze"
       ></animateTransform>
     `;
+  }
+
+  // The lap chain and the lawn outline come from two different mower data
+  // sources and disagree by a cell or two, drifting further from the chain's
+  // top-left anchor (visibly off along the right edge). The app never draws
+  // the chain — it recolours the lawn boundary by progress — so do the same:
+  // keep the outline runs that lie near any remaining border point, drop the
+  // rest. The chain only decides WHICH parts of the boundary are pending.
+  _snapBorderToOutline(outline, segments, step) {
+    if (!Array.isArray(outline) || outline.length < 3 || !segments.length) {
+      return segments;
+    }
+    const cell = Number(step) > 0 ? Number(step) : 50;
+    const nearestIndex = (target) => {
+      let best = 0;
+      let bestDistance = Infinity;
+      for (let i = 0; i < outline.length; i += 1) {
+        const dx = outline[i].x - target.x;
+        const dy = outline[i].y - target.y;
+        const distance = dx * dx + dy * dy;
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          best = i;
+        }
+      }
+      return best;
+    };
+    const first = segments[0];
+    if (segments.length === 1 && first.length > 2) {
+      const head = first[0];
+      const tail = first[first.length - 1];
+      if (Math.abs(head.x - tail.x) + Math.abs(head.y - tail.y) <= 2 * cell) {
+        // The closed announcement: the whole lap is ahead — one full ring.
+        return [outline.concat([outline[0]])];
+      }
+    }
+    if (segments.length >= 2) {
+      // Composed remainder: a leading arc (origin -> mower's front) plus the
+      // template tail (lap start -> origin). The stretch of boundary between
+      // the front and the lap start is exactly what has been cut, so walk
+      // the ring from the lap start through the origin to the front and skip
+      // nothing else — gap edges come from topology, not from a distance
+      // threshold that used to swallow the young gap early in the job.
+      const count = outline.length;
+      const originIndex = nearestIndex(first[0]);
+      const arcSegment = segments[segments.length - 2];
+      const frontIndex = nearestIndex(arcSegment[arcSegment.length - 1]);
+      const startIndex = nearestIndex(segments[segments.length - 1][0]);
+      if (frontIndex === startIndex) {
+        return [outline.concat([outline[0]])];
+      }
+      const forwardToOrigin = (originIndex - startIndex + count) % count;
+      const forwardToFront = (frontIndex - startIndex + count) % count;
+      const direction = forwardToOrigin <= forwardToFront ? 1 : -1;
+      const run = [];
+      for (let i = startIndex; ; i = (i + direction + count) % count) {
+        run.push(outline[i]);
+        if (i === frontIndex) {
+          break;
+        }
+      }
+      return run.length > 1 ? [run] : segments;
+    }
+    // Single open segment (no template after a mid-job restart, or only the
+    // tail once the mower passed the origin): fall back to proximity.
+    const limit = (cell * 8) ** 2;
+    // Straight stretches survive the decoder as their two endpoints only, so
+    // nearness must be measured against the chain's edges, not its points.
+    const edges = [];
+    for (const segment of segments) {
+      for (let i = 1; i < segment.length; i += 1) {
+        edges.push([segment[i - 1], segment[i]]);
+      }
+      if (segment.length === 1) {
+        edges.push([segment[0], segment[0]]);
+      }
+    }
+    const nearAnyEdge = (vertex) =>
+      edges.some(([a, b]) => {
+        const abx = b.x - a.x;
+        const aby = b.y - a.y;
+        const length2 = abx * abx + aby * aby;
+        let t = 0;
+        if (length2 > 0) {
+          t = ((vertex.x - a.x) * abx + (vertex.y - a.y) * aby) / length2;
+          t = Math.max(0, Math.min(1, t));
+        }
+        const dx = vertex.x - (a.x + t * abx);
+        const dy = vertex.y - (a.y + t * aby);
+        return dx * dx + dy * dy <= limit;
+      });
+    const pendingAt = outline.map(nearAnyEdge);
+    if (pendingAt.every(Boolean)) {
+      // The whole lap is ahead: one closed ring.
+      return [outline.concat([outline[0]])];
+    }
+    // Start on a gap so a run never straddles the array seam, then collect
+    // consecutive pending vertices into ring-ordered polylines.
+    const start = pendingAt.findIndex((flag) => !flag);
+    const runs = [];
+    let run = null;
+    for (let offset = 0; offset < outline.length; offset += 1) {
+      const index = (start + offset) % outline.length;
+      if (pendingAt[index]) {
+        if (!run) {
+          run = [];
+        }
+        run.push(outline[index]);
+      } else if (run) {
+        if (run.length > 1) {
+          runs.push(run);
+        }
+        run = null;
+      }
+    }
+    if (run && run.length > 1) {
+      runs.push(run);
+    }
+    return runs;
   }
 
   _positions(value) {

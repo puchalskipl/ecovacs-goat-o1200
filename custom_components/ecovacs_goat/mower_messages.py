@@ -13,6 +13,7 @@ from typing import Any
 from .map_geometry import (
     CHAIN_STEP,
     OUTLINE_SOURCE_MOWER,
+    compose_border,
     parse_track_record,
     obstacles_from_area_info,
     outline_from_map_info,
@@ -948,6 +949,8 @@ def _map_track_push(current: MowerMap, data: dict[str, Any]) -> MowerMap:
     step = current.info.chain_step or CHAIN_STEP
     lanes = dict(current.trace.lanes)
     border = current.trace.border
+    border_template = current.trace.border_template
+    border_lap_start = current.trace.border_lap_start
     touched = False
     for record in decoded:
         if not isinstance(record, list) or len(record) < 2:
@@ -980,7 +983,12 @@ def _map_track_push(current: MowerMap, data: dict[str, Any]) -> MowerMap:
             # including the edge lap once it stops being listed.
             if seen:
                 lanes = seen
-            border = seen_border
+            # Mid-job the mower snapshots only the arc up to the loop's
+            # origin; compose the never-transmitted tail from the closed
+            # announcement so the drawn remainder covers the whole lap.
+            border, border_template, border_lap_start = compose_border(
+                border_template, border_lap_start, seen_border, step=step
+            )
         else:
             lanes.update(seen)
     if not touched:
@@ -992,6 +1000,8 @@ def _map_track_push(current: MowerMap, data: dict[str, Any]) -> MowerMap:
             current.trace,
             lanes=lanes,
             border=border,
+            border_template=border_template,
+            border_lap_start=border_lap_start,
             batch_id=data.get("batid") or current.trace.batch_id,
             serial=str(data.get("serial")) if data.get("serial") else current.trace.serial,
             info_size=_int(data.get("infoSize")) or current.trace.info_size,

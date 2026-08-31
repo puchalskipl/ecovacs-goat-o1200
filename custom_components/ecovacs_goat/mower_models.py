@@ -285,8 +285,20 @@ class MowerMapTrace:
     # The edge lap still to drive, sent chain-coded alongside the lanes. Kept
     # apart because it is drawn differently (it runs along the lawn boundary)
     # and because it can shrink to a straight run, so it cannot be told from a
-    # lane by shape alone.
-    border: tuple[tuple[MapPosition, ...], ...] = ()
+    # lane by shape alone. Three states: None = no snapshot seen yet (the lap
+    # is still ahead, extent unknown), a non-empty tuple = this much remains,
+    # an empty tuple = the lap is done (it dropped out of the plan).
+    border: tuple[tuple[MapPosition, ...], ...] | None = None
+    # The full lap as first announced (the chain arrives CLOSED before the
+    # mower starts driving it). Mid-job snapshots then carry only the arc
+    # from the loop's fixed origin to the mower's front — the tail beyond the
+    # origin is never sent — so the full remainder must be composed from this
+    # template. See map_geometry.compose_border.
+    border_template: tuple[MapPosition, ...] | None = None
+    # Index into border_template of the vertex where the mower broke the loop
+    # (the lap's start ≈ its end). The template arc from here back to the
+    # origin is the never-transmitted tail.
+    border_lap_start: int | None = None
 
     @property
     def pending_segments(self) -> tuple[tuple[MapPosition, ...], ...]:
@@ -319,7 +331,9 @@ class MowerMapTrace:
                 [position.as_dict() for position in segment]
                 for segment in self.pending_segments
             ],
-            "border": [
+            "border": None
+            if self.border is None
+            else [
                 [position.as_dict() for position in segment]
                 for segment in self.border
             ],

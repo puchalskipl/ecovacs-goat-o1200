@@ -26,6 +26,9 @@ from .const import (
     SERVICE_STOP_DEBUG_CAPTURE,
 )
 from .controller import EcovacsController
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.typing import ConfigType
+
 from .frontend import async_register_frontend_card
 from .session_store import async_remove_account_session_store
 from .util import generate_client_device_id, generate_session_store_id
@@ -93,6 +96,23 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if CONF_SESSION_STORE_ID not in data:
         data[CONF_SESSION_STORE_ID] = generate_session_store_id()
     hass.config_entries.async_update_entry(entry, data=data, minor_version=3)
+    return True
+
+
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Register the dashboard card as early as Home Assistant allows.
+
+    The card's static path used to appear only once the config entry finished
+    its (slow, cloud-bound) setup. A frontend that loaded during that window —
+    the companion app reconnecting right after a restart, typically — got a
+    404 for the card module and kept showing "configuration error" until its
+    cache was cleared. Component setup runs long before entries, so the file
+    is servable moments after HTTP comes up.
+    """
+    await async_register_frontend_card(hass)
     return True
 
 

@@ -81,7 +81,7 @@
         "name": "Rozpocznij zapis diagnostyczny"
       },
       "start_edge_trim": {
-        "name": "Przycinanie krawędzi"
+        "name": "Podkaszanie krawędzi"
       },
       "stop_debug_capture": {
         "name": "Zatrzymaj zapis diagnostyczny"
@@ -180,7 +180,7 @@
         "name": "Ostatnie koszenie"
       },
       "last_edge_trim": {
-        "name": "Ostatnie przycinanie"
+        "name": "Ostatnie podkaszanie"
       }
     },
     "switch": {
@@ -194,7 +194,7 @@
         "name": "Cotygodniowa zmiana kierunku"
       },
       "border_switch": {
-        "name": "Koszenie krawędzi"
+        "name": "Dokaszanie krawędzi"
       },
       "cross_map_border_warning": {
         "name": "Alarm przekroczenia granicy"

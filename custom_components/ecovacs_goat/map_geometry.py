@@ -351,3 +351,92 @@ def stabilise_geometry(
         ),
         remembered,
     )
+
+
+def carry_forward_track(
+    remembered: tuple | None,
+    incoming: tuple,
+    *,
+    from_push: bool,
+    remapped: bool,
+) -> tuple[tuple, tuple | None]:
+    """Decide which remaining-work layer to publish, and what to remember.
+
+    ``incoming`` and ``remembered`` are ``(lanes, border, border_template,
+    border_lap_start)`` tuples. Only an
+    ``onMapTrack`` push (``from_push``) may move this layer: every other
+    publish — grouped refreshes above all — was assembled from a snapshot
+    taken seconds earlier and would drag the layer backwards.
+
+    All four travel in the same push, so all four must be carried. Keeping
+    only the lanes left the border blanked by every ordinary refresh, and the
+    card went on drawing the last loop it happened to catch instead of the
+    one still to cut; losing the template would strand compose_border without
+    the lap's never-transmitted tail. The border is tri-state — ``None`` (no
+    snapshot yet), ``()`` (done) or the cells left — which is why the tuple
+    is wrapped: it tells "remembered as None" apart from "nothing remembered
+    yet".
+
+    Returns ``(to_publish, to_remember)``.
+    """
+    if remapped:
+        remembered = None
+    if from_push:
+        return incoming, incoming
+    if remembered is None:
+        return incoming, None
+    return remembered, remembered
+
+
+def compose_border(
+    template: tuple | None,
+    lap_start: int | None,
+    arc_segments: tuple,
+    *,
+    step: int,
+) -> tuple[tuple, tuple | None, int | None]:
+    """Compose the full remaining edge lap from a mid-job arc.
+
+    The mower announces the lap as a CLOSED chain before driving it, then
+    keeps snapshotting only the arc from the loop's fixed origin to its own
+    front — the tail beyond the origin (which it cuts last, ending where it
+    began) is never transmitted. Drawn alone, the arc leaves that tail
+    unpainted although it is still ahead: observed live 2026-08-30, the card
+    lost the whole right side of the lawn 30 s into an edge trim.
+
+    So: remember the closed announcement as the lap ``template``; when the
+    first open arc arrives, the vertex nearest its front is where the mower
+    broke the loop (``lap_start``); the template arc from there back through
+    the listing's end is the missing tail, appended to every published
+    border. An empty arc means the mower has passed the origin — only the
+    tail remains.
+
+    Returns ``(border_segments, template_points, lap_start_index)``.
+    """
+    points = [point for segment in arc_segments for point in segment]
+
+    if points:
+        head, tail = points[0], points[-1]
+        if abs(head.x - tail.x) + abs(head.y - tail.y) <= 2 * step:
+            # A closed chain is the announcement of the whole lap.
+            return arc_segments, tuple(points), None
+
+    if template is None:
+        # Restart mid-job: no announcement seen, publish the arc as-is.
+        return arc_segments, None, None
+
+    if points and lap_start is None:
+        front = points[-1]
+        lap_start = min(
+            range(len(template)),
+            key=lambda i: abs(template[i].x - front.x)
+            + abs(template[i].y - front.y),
+        )
+
+    if lap_start is None:
+        return arc_segments, template, lap_start
+
+    missing_tail = template[lap_start:]
+    if len(missing_tail) >= 2:
+        return (*arc_segments, missing_tail), template, lap_start
+    return arc_segments, template, lap_start

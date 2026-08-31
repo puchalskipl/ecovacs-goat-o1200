@@ -22,6 +22,7 @@ from .goat_models import classify_goat_variant
 from .map_geometry import (
     OUTLINE_SOURCE_COVERAGE,
     OUTLINE_SOURCE_MOWER,
+    carry_forward_track,
     stabilise_geometry,
 )
 from .map_outline import outline_from_coverage, polygon_area
@@ -311,9 +312,13 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
         # Set while publishing an onMI/onArI push, whose geometry is new
         # by definition and therefore replaces what we remembered.
         self._geometry_push_pending = False
-        # Same idea for the remaining-work lanes (see TRACK_PUSH_COMMANDS).
+        # Same idea for the remaining work (see TRACK_PUSH_COMMANDS). Lanes and
+        # the border lap travel in the same push and must be remembered
+        # together: the border is tri-state (None = no snapshot yet, () = done,
+        # otherwise what is left), so it needs the surrounding tuple to tell
+        # "remembered as None" from "nothing remembered yet".
         self._track_push_pending = False
-        self._remembered_lanes: dict[str, tuple] | None = None
+        self._remembered_track: tuple[dict[str, tuple], tuple | None] | None = None
         # In-flight job being tracked for the last-job summaries.
         self._active_job: dict[str, Any] | None = None
         # Last-job records restored from storage before the first refresh.
@@ -844,45 +849,71 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
             data = replace(
                 data,
                 map=replace(
-                    data.map, trace=replace(data.map.trace, lanes={})
+                    data.map,
+                    trace=replace(
+                        data.map.trace,
+                        lanes={},
+                        border=None,
+                        border_template=None,
+                        border_lap_start=None,
+                    ),
                 ),
             )
-            self._remembered_lanes = {}
-        data = self._carry_forward_lanes(previous, data)
+            self._remembered_track = ({}, None, None, None)
+        data = self._carry_forward_track(previous, data)
         data = self._carry_forward_map_geometry(previous, data)
         data = self._maybe_update_outline(data)
         super().async_set_updated_data(data)
         self._schedule_map_history_save(data.map)
 
-    def _carry_forward_lanes(
+    def _carry_forward_track(
         self, previous: MowerState | None, data: MowerState
     ) -> MowerState:
-        """Let only an onMapTrack push change the remaining-work lanes.
+        """Let only an onMapTrack push change the remaining work to be cut.
 
         Everything else that publishes state — grouped refreshes above all —
-        was assembled before the newest push and carries older lanes. Left
+        was assembled before the newest push and carries an older track. Left
         alone it makes the layer flicker, which shows up as a boundary that
         alternates between "still to cut" and "done" on every redraw.
+
+        Lanes and the border lap are carried together. Carrying only the lanes
+        left the border blanked by every ordinary refresh, so during an edge
+        trim the card kept redrawing whatever loop it had last seen instead of
+        the one that is actually left.
         """
-        if (
+        remapped = (
             previous is not None
             and data.map.mid is not None
             and previous.map.mid != data.map.mid
-        ):
-            self._remembered_lanes = None
-        if self._track_push_pending:
-            self._track_push_pending = False
-            self._remembered_lanes = data.map.trace.lanes
+        )
+        from_push = self._track_push_pending
+        self._track_push_pending = False
+        incoming = (
+            data.map.trace.lanes,
+            data.map.trace.border,
+            data.map.trace.border_template,
+            data.map.trace.border_lap_start,
+        )
+        published, self._remembered_track = carry_forward_track(
+            self._remembered_track,
+            incoming,
+            from_push=from_push,
+            remapped=remapped,
+        )
+        if published == incoming:
             return data
-        if self._remembered_lanes is None or (
-            data.map.trace.lanes == self._remembered_lanes
-        ):
-            return data
+        lanes, border, template, lap_start = published
         return replace(
             data,
             map=replace(
                 data.map,
-                trace=replace(data.map.trace, lanes=self._remembered_lanes),
+                trace=replace(
+                    data.map.trace,
+                    lanes=lanes,
+                    border=border,
+                    border_template=template,
+                    border_lap_start=lap_start,
+                ),
             ),
         )
 
@@ -945,6 +976,13 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
             return data
 
         if job is None:
+            return data
+        if data.clean_type is not None:
+            # The task is still open (cleanState carries a job type): what
+            # looked like "docked" is the transient isCharging push racing the
+            # clean-state push while the mower parks to recharge. Closing here
+            # recorded a mid-job "last mowing" and fired the edge-trim
+            # automation while the mower was still busy.
             return data
         self._active_job = None
         ended_at = dt_util.utcnow()
@@ -1871,7 +1909,12 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
         )
         await self.control(
             self._capability.clean_command,
-            self._capability.clean_body(act),
+            # Resuming must name the job that is actually open (a paused edge
+            # trim resumes as "borderrotate", not "auto") — the mower ignores
+            # a clean act whose content.type does not match the open job.
+            self._capability.clean_body(
+                act, self.data.clean_type if act == "resume" else None
+            ),
             refresh_if_stale=False,
         )
         mower_map = self.data.map
@@ -1939,7 +1982,7 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
         await self.async_refresh_if_stale()
         await self.control(
             self._capability.clean_command,
-            self._capability.clean_body("pause"),
+            self._capability.clean_body("pause", self.data.clean_type),
             refresh_if_stale=False,
         )
         self.async_set_updated_data(replace(self.data, activity=MowerActivity.PAUSED))
@@ -1952,7 +1995,9 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
         await self.async_refresh_if_stale()
         await self.control(
             self._capability.clean_command,
-            self._capability.clean_body("stop"),
+            # Stop must name the open job: a stop typed "auto" during an edge
+            # trim is acked and ignored (the trim could not be ended from HA).
+            self._capability.clean_body("stop", self.data.clean_type),
             refresh_if_stale=False,
         )
         self.async_set_updated_data(replace(self.data, activity=MowerActivity.IDLE))

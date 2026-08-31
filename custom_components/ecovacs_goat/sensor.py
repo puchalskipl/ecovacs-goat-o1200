@@ -121,7 +121,13 @@ SENSORS: tuple[MowerSensorDescription, ...] = (
             or state.map.info.obstacles
         )
         else None,
-        attr_fn=lambda state: state.map.as_dict(),
+        # The card needs to know whether edge mowing is part of a job at
+        # all: with the "border switch" off no lap is coming, so the boundary
+        # must not be painted as "still to edge" when a job starts.
+        attr_fn=lambda state: {
+            **state.map.as_dict(),
+            "border_mowing_enabled": state.settings.border_switch,
+        },
         entity_category=EntityCategory.DIAGNOSTIC,
     ),
     MowerSensorDescription(

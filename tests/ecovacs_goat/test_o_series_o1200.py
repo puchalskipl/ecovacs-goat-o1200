@@ -822,3 +822,55 @@ def test_trigger_is_kept_across_pushes_that_omit_it_and_cleared_when_idle() -> N
 
     finished = _mqtt(state, "onCleanInfo", {"state": "idle"})
     assert finished.clean_trigger is None
+
+
+def test_border_is_unknown_until_a_snapshot_settles_it() -> None:
+    """Three border states drive the boundary colour on the card.
+
+    None (no snapshot yet) means the lap is still ahead of the mower, so a
+    running job paints the whole ring green; a tuple is the remaining part;
+    an empty tuple means the lap is done. Updates alone must not settle it.
+    """
+    state = MowerState()
+    assert state.map.trace.border is None
+
+    # A lane update arrives, but no snapshot: still unknown.
+    state = _track_push(state, field="1;1;240;-17750,11849;-17750,17400")
+    assert state.map.trace.border is None
+
+    # A snapshot with the lap: known, non-empty.
+    state = _track_push(
+        state, field="1;2;0;-23900,17500;4(3)2(3)8(3)6(3)", kind="1"
+    )
+    assert state.map.trace.border
+
+    # A snapshot without it: done.
+    state = _track_push(state, field="1;1;240;-17750,15000;-17750,17400", kind="1")
+    assert state.map.trace.border == ()
+
+
+def test_recharge_docking_must_not_close_the_running_job() -> None:
+    """The charge push races the clean push while the mower parks to recharge.
+
+    Live incident (2026-08-30): ``isCharging: 1`` flipped the activity to
+    docked a moment before the clean push corrected it to paused, the
+    coordinator closed the job, recorded a mid-job "last mowing" and the
+    edge-trim automation fired while the mower was still mid-task. As long as
+    ``cleanState`` still carries a job type, the job is open — whatever the
+    activity claims.
+    """
+    state = _mqtt(
+        MowerState(),
+        "onCleanInfo",
+        {
+            "trigger": "lowBattery",
+            "state": "clean",
+            "cleanState": {"motionState": "pause", "content": {"type": "auto"}},
+        },
+    )
+    # The racing charge push declares "docked"...
+    state = _mqtt(state, "onChargeState", {"isCharging": 1, "mode": "slot"})
+
+    assert state.activity is MowerActivity.DOCKED
+    # ...but the task is still open, which is what the lifecycle guard checks.
+    assert state.clean_type == "auto"

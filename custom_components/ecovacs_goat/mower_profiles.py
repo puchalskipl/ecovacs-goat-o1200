@@ -88,17 +88,27 @@ class CapabilityProfile:
     experimental: bool
     label: str
 
-    def clean_body(self, act: str) -> dict[str, Any]:
+    def clean_body(self, act: str, job_type: str | None = None) -> dict[str, Any]:
         """Return the ``clean`` / ``clean_V2`` body for a mowing action.
 
         ``act`` is one of ``start`` / ``resume`` / ``pause`` / ``stop``.
+
+        ``job_type`` is the type of the job currently open on the mower
+        (``auto`` for a mow, ``borderrotate`` for an edge trim). The mower
+        matches ``content.type`` against the running job and silently ignores
+        a mismatch: a stop typed ``auto`` during an edge trim is answered
+        ``ok`` and does nothing (observed live 2026-08-30 — the trim could
+        not be stopped from HA, only ``charge`` worked).
         """
         if self.clean_always_content:
-            return {"act": act, "content": {"type": "auto"}}
+            return {"act": act, "content": {"type": job_type or "auto"}}
         if act == "start":
-            return {"act": "start", "content": {"type": "auto"}}
+            return {"act": "start", "content": {"type": job_type or "auto"}}
         if act == "stop":
-            return {"act": "stop", "content": {"type": self.stop_content_type}}
+            return {
+                "act": "stop",
+                "content": {"type": job_type or self.stop_content_type},
+            }
         return {"act": act}
 
     def as_dict(self) -> dict[str, Any]:

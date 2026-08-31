@@ -16,6 +16,7 @@ sys.modules.setdefault("custom_components.ecovacs_goat", ecovacs_goat)
 
 from custom_components.ecovacs_goat.map_geometry import (
     OUTLINE_SOURCE_COVERAGE,
+    carry_forward_track,
     OUTLINE_SOURCE_MOWER,
     stabilise_geometry,
 )
@@ -120,29 +121,115 @@ def test_trace_protection_logic_matches_coordinator_rules() -> None:
     assert keep_after_remap is False
 
 
+LANES = {"26": ((MapPosition(x=0, y=0), MapPosition(x=0, y=100)),)}
+BORDER = ((MapPosition(x=0, y=0), MapPosition(x=100, y=0)),)
+
+
+TEMPLATE = tuple(
+    MapPosition(x=x, y=y)
+    for x, y in [(0, 100), (0, 0), (50, 0), (100, 0), (100, 100), (50, 100)]
+)
+
+
 def test_only_a_track_push_may_change_the_remaining_lanes() -> None:
-    """Mirrors MowerCoordinator._carry_forward_lanes.
+    """The layer the coordinator publishes for the remaining work.
 
     Observed live: the drawn boundary alternated between "still to cut" and
     "done" on every refresh, because grouped refreshes republished whatever
     lanes were current when they started. Only an onMapTrack push may move
     that layer; a remap clears what is remembered.
     """
-    lanes = {"26": ((MapPosition(x=0, y=0), MapPosition(x=0, y=100)),)}
-
     # A push teaches the layer.
-    remembered, from_push = lanes, True
-    assert from_push and remembered == lanes
+    published, remembered = carry_forward_track(
+        None, (LANES, BORDER, None, None), from_push=True, remapped=False
+    )
+    assert published == (LANES, BORDER, None, None)
 
-    # A stale refresh carrying no lanes must not blank it.
-    incoming, from_push = {}, False
-    published = incoming if from_push or remembered is None else remembered
-    assert published == lanes
+    # A stale refresh carrying nothing must not blank it.
+    published, remembered = carry_forward_track(
+        remembered, ({}, None, None, None), from_push=False, remapped=False
+    )
+    assert published == (LANES, BORDER, None, None)
 
     # A remap drops it, so the next map starts clean.
-    remembered = None
-    published = incoming if remembered is None else remembered
-    assert published == {}
+    published, remembered = carry_forward_track(
+        remembered, ({}, None, None, None), from_push=False, remapped=True
+    )
+    assert published == ({}, None, None, None)
+    assert remembered is None
+
+
+def test_a_stale_refresh_must_not_blank_the_border_lap() -> None:
+    """The border lap rides in the same push as the lanes and is kept too.
+
+    Observed live during an edge trim (2026-08-30): the lanes were carried
+    forward but the border was not, so every ordinary refresh reset it to
+    None. The card kept drawing the last loop it had managed to catch, which
+    by then bore no relation to what was left — green ran both ahead of the
+    mower and behind it.
+    """
+    # An edge trim plans no lanes at all: the border is the whole job. The
+    # template and lap-start index ride along so compose_border survives
+    # grouped refreshes rebuilding the trace from scratch.
+    published, remembered = carry_forward_track(
+        None, ({}, BORDER, TEMPLATE, 3), from_push=True, remapped=False
+    )
+    assert published[1] == BORDER
+
+    published, remembered = carry_forward_track(
+        remembered, ({}, None, None, None), from_push=False, remapped=False
+    )
+    assert published[1] == BORDER, "a refresh must not retire the lap"
+    assert published[2] == TEMPLATE, "a refresh must not lose the template"
+    assert published[3] == 3
+
+    # Only a push may retire it, and "done" is () — distinct from "unknown".
+    published, remembered = carry_forward_track(
+        remembered, ({}, (), TEMPLATE, 3), from_push=True, remapped=False
+    )
+    assert published[1] == ()
+
+    published, _ = carry_forward_track(
+        remembered, ({}, None, None, None), from_push=False, remapped=False
+    )
+    assert published[1] == (), "done must survive the next stale refresh"
+
+
+def test_the_border_tail_beyond_the_origin_is_composed_from_the_template() -> None:
+    """compose_border on the shape observed live on 2026-08-30.
+
+    The mower announces the lap CLOSED, then snapshots only the arc from the
+    loop's origin to its front — the tail it will cut last (origin backwards
+    to where it broke the loop) is never transmitted. Drawn alone, the arc
+    left the lawn's whole right side unpainted 30 s into the trim.
+    """
+    from custom_components.ecovacs_goat.map_geometry import compose_border
+
+    # 1. The closed announcement becomes the template; drawn whole.
+    closed = (TEMPLATE + (MapPosition(x=0, y=100),),)
+    border, template, lap_start = compose_border(None, None, closed, step=50)
+    assert border == closed
+    assert template == closed[0]
+    assert lap_start is None
+
+    # 2. First open arc: origin -> front. The mower broke the loop at the
+    #    vertex nearest the arc's end; the template tail from there on is
+    #    appended so the whole remainder is drawn.
+    arc = ((TEMPLATE[0], TEMPLATE[1], TEMPLATE[2]),)
+    border, template, lap_start = compose_border(template, None, arc, step=50)
+    assert lap_start == 2
+    # The tail runs from the break vertex through the template's closing
+    # point back at the origin — the closing duplicate rides along.
+    assert border == (arc[0], template[2:])
+
+    # 3. Empty arc: the mower passed the origin — only the tail remains.
+    border, template, lap_start = compose_border(template, lap_start, (), step=50)
+    assert border == (template[2:],)
+
+    # 4. Without a template (restart mid-job) the arc passes through as-is.
+    border, template2, _ = compose_border(None, None, arc, step=50)
+    assert border == arc
+    assert template2 is None
 
 
 def test_job_duration_covers_the_whole_session_including_the_recharge() -> None:
