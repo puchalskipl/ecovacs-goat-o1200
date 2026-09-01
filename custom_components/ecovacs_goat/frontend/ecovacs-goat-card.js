@@ -1632,8 +1632,21 @@ class EcovacsGoatCard extends HTMLElement {
         // boundary line) released the trim and the green edge jumped back.
         let back = bestDistance <= nearLimit ? bestBack : 0;
         const memo = this._borderTrimMemo;
-        if (memo && memo.front === frontIndex) {
-          back = Math.max(back, memo.back);
+        if (memo) {
+          if (memo.front === frontIndex) {
+            back = Math.max(back, memo.back);
+          } else {
+            // A new snapshot advanced the data front by k vertices; the
+            // mower's true position moved WITH it, so the remembered trim
+            // carries over reduced by that advance instead of resetting.
+            // Without this, a snapshot landing while the mower rounds a
+            // corner (off the boundary line) snapped the white edge back
+            // to the raw data front for up to half a minute.
+            const advance = ((memo.front - frontIndex) * direction + count) % count;
+            if (advance > 0 && advance <= window) {
+              back = Math.max(back, memo.back - advance);
+            }
+          }
         }
         if (back > 0) {
           run.length = run.length - Math.min(back, run.length - 2);
