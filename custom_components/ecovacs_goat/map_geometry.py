@@ -394,6 +394,7 @@ def compose_border(
     arc_segments: tuple,
     *,
     step: int,
+    previous: tuple | None = None,
 ) -> tuple[tuple, tuple | None, int | None]:
     """Compose the full remaining edge lap from a mid-job arc.
 
@@ -415,15 +416,37 @@ def compose_border(
     """
     points = [point for segment in arc_segments for point in segment]
 
-    if points:
+    if len(points) >= 8:
         head, tail = points[0], points[-1]
         if abs(head.x - tail.x) + abs(head.y - tail.y) <= 2 * step:
-            # A closed chain is the announcement of the whole lap.
+            # A closed chain is the announcement of the whole lap. The size
+            # floor keeps a short blip whose ends happen to sit close together
+            # from being mistaken for a lap and becoming the template.
             return arc_segments, tuple(points), None
 
     if template is None:
         # Restart mid-job: no announcement seen, publish the arc as-is.
         return arc_segments, None, None
+
+    if points:
+        origin = template[0]
+        head = points[0]
+        if abs(head.x - origin.x) + abs(head.y - origin.y) > 4 * step:
+            # Not the origin arc: a stub of cells around the mower has landed
+            # in the border slot (observed live 2026-09-01 — a two-point run
+            # at the mower's position). Composing a ring from it anchors the
+            # cut/remaining split at the wrong vertex and redraws long-done
+            # boundary as pending. The real mid-job arc always starts at the
+            # loop's fixed origin, so anything else is noise: keep what we
+            # last published.
+            if previous is not None:
+                return previous, template, lap_start
+            kept: tuple = ()
+            if lap_start is not None:
+                missing_tail = template[lap_start:]
+                if len(missing_tail) >= 2:
+                    kept = (missing_tail,)
+            return kept, template, lap_start
 
     if points and lap_start is None:
         front = points[-1]

@@ -1026,7 +1026,11 @@ def _map_track_push(current: MowerMap, data: dict[str, Any]) -> MowerMap:
             # origin; compose the never-transmitted tail from the closed
             # announcement so the drawn remainder covers the whole lap.
             border, border_template, border_lap_start = compose_border(
-                border_template, border_lap_start, seen_border, step=step
+                border_template,
+                border_lap_start,
+                seen_border,
+                step=step,
+                previous=border,
             )
         else:
             lanes.update(seen)

@@ -127,7 +127,16 @@ BORDER = ((MapPosition(x=0, y=0), MapPosition(x=100, y=0)),)
 
 TEMPLATE = tuple(
     MapPosition(x=x, y=y)
-    for x, y in [(0, 100), (0, 0), (50, 0), (100, 0), (100, 100), (50, 100)]
+    for x, y in [
+        (0, 100),
+        (0, 50),
+        (0, 0),
+        (50, 0),
+        (100, 0),
+        (100, 50),
+        (100, 100),
+        (50, 100),
+    ]
 )
 
 
@@ -346,3 +355,39 @@ def test_the_reported_split_never_exceeds_the_job() -> None:
         )
         == 20.0
     )
+
+
+def test_a_stub_at_the_mower_never_replaces_the_border_arc() -> None:
+    """compose_border rejects arcs that do not start at the loop's origin.
+
+    Observed live 2026-09-01: a two-point run at the mower's position landed
+    in the border slot mid-trim. Composed blindly, it anchored the ring at
+    the wrong vertex and the card redrew long-done boundary as pending
+    ("the old ring came back"). The genuine mid-job arc always starts at the
+    template's fixed origin; anything else keeps the previous border.
+    """
+    from custom_components.ecovacs_goat.map_geometry import compose_border
+
+    closed = (TEMPLATE + (MapPosition(x=0, y=100),),)
+    border, template, lap_start = compose_border(None, None, closed, step=50)
+
+    arc = ((TEMPLATE[0], TEMPLATE[1], TEMPLATE[2]),)
+    border, template, lap_start = compose_border(
+        template, None, arc, step=50, previous=border
+    )
+    dobra = border
+
+    # The stub: far from the origin, at the mower.
+    stub = ((MapPosition(x=600, y=400), MapPosition(x=650, y=400)),)
+    border, template2, lap_start2 = compose_border(
+        template, lap_start, stub, step=50, previous=dobra
+    )
+    assert border == dobra, "stub must not change the published border"
+    assert template2 == template
+    assert lap_start2 == lap_start
+
+    # Without a previous border it degrades to the known tail, not the stub.
+    border, _, _ = compose_border(
+        template, lap_start, stub, step=50, previous=None
+    )
+    assert stub[0] not in border
