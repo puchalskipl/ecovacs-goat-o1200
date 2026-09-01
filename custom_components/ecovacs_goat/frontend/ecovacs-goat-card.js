@@ -1607,17 +1607,38 @@ class EcovacsGoatCard extends HTMLElement {
       // cannot bite chunks out of the pending ring.
       if (mowerPosition && run.length > 3) {
         const cell = Number(step) > 0 ? Number(step) : 50;
-        const nearLimit = (cell * 4) ** 2;
+        // Generous: outline vertices sit ~8 cells apart, so a mower halfway
+        // between two of them must still register — a limit near half the
+        // spacing made the trim latch and release as the mower crossed each
+        // midpoint, and the green edge jittered back and forth by a metre
+        // (reproduced frame-by-frame from the 2026-09-01 capture).
+        const nearLimit = (cell * 8) ** 2;
         const window = Math.min(24, run.length - 2);
+        let bestBack = 0;
+        let bestDistance = nearLimit + 1;
         for (let back = 1; back <= window; back += 1) {
           const vertex = run[run.length - 1 - back];
           const dx = vertex.x - mowerPosition.x;
           const dy = vertex.y - mowerPosition.y;
-          if (dx * dx + dy * dy <= nearLimit) {
-            run.length = run.length - back;
-            break;
+          const distance = dx * dx + dy * dy;
+          if (distance < bestDistance) {
+            bestDistance = distance;
+            bestBack = back;
           }
         }
+        // Monotonic per data-front: the mower only ever advances between
+        // snapshots, so within one front the trim may grow but never
+        // shrink — otherwise every corner (where the mower swings off the
+        // boundary line) released the trim and the green edge jumped back.
+        let back = bestDistance <= nearLimit ? bestBack : 0;
+        const memo = this._borderTrimMemo;
+        if (memo && memo.front === frontIndex) {
+          back = Math.max(back, memo.back);
+        }
+        if (back > 0) {
+          run.length = run.length - Math.min(back, run.length - 2);
+        }
+        this._borderTrimMemo = { front: frontIndex, back };
       }
       return run.length > 1 ? [run] : segments;
     }
