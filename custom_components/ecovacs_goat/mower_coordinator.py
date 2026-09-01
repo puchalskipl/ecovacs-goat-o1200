@@ -57,6 +57,7 @@ from .mower_models import (
     MowerState,
     standstill_bucket,
 )
+from .state_merge import changed_field_names, merge_refreshed_state
 from .mower_mqtt import MowerAppPresenceMqttClient, MowerMqttClient
 
 _LOGGER = logging.getLogger(__name__)
@@ -641,6 +642,7 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
 
     async def _async_update_data(self) -> MowerState:
         """Refresh from the mower using a small app-style command set."""
+        base = self.data
         try:
             state = await self._async_refresh_state_groups()
             state = await self._async_refresh_extras(state)
@@ -649,8 +651,10 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
         except Exception as err:
             raise UpdateFailed(f"Unexpected ECOVACS update error: {err}") from err
 
-        # Poll refreshes bypass async_set_updated_data, so track jobs here too.
-        return self._track_job_lifecycle(self.data, state)
+        # Poll refreshes bypass async_set_updated_data, so merge and track
+        # jobs here too — HA assigns this return value to self.data directly.
+        merged = merge_refreshed_state(base, state, self.data)
+        return self._track_job_lifecycle(self.data, merged)
 
     async def _async_refresh_extras(self, state: MowerState) -> MowerState:
         """Refresh network info, consumable lifespans, and total stats."""
@@ -1236,11 +1240,35 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
             "ecovacs_goat_mqtt_readback",
         )
 
+    def _publish_refreshed(self, base: MowerState | None, refreshed: MowerState) -> MowerState:
+        """Publish a refresher's result without reverting fresher pushes.
+
+        ``base`` is the snapshot the refresher started from. Every field a
+        push moved while the refresher was awaiting its HTTP calls keeps the
+        pushed value; the refresh still contributes the fields only it polls.
+        See state_merge.merge_refreshed_state for the full story.
+        """
+        merged = merge_refreshed_state(base, refreshed, self.data)
+        if self._debug_capture is not None and merged is not refreshed:
+            kept = changed_field_names(merged, refreshed)
+            if kept:
+                self._capture_event(
+                    "refresh_merge_kept_current", {"fields": list(kept)}
+                )
+        self.async_set_updated_data(merged)
+        return merged
+
+    async def _async_refresh_groups_and_publish(self) -> MowerState:
+        """Run a grouped refresh and publish it through the merge."""
+        base = self.data
+        refreshed = await self._async_refresh_state_groups()
+        return self._publish_refreshed(base, refreshed)
+
     async def _async_debounced_mqtt_readback(self) -> None:
         """Refresh grouped data after related MQTT pushes have settled."""
         try:
             await asyncio.sleep(MQTT_READBACK_DEBOUNCE_SECONDS)
-            self.async_set_updated_data(await self._async_refresh_state_groups())
+            await self._async_refresh_groups_and_publish()
         except asyncio.CancelledError:
             raise
         except Exception as err:
@@ -1274,6 +1302,7 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
                 and monotonic() - freshest < AVAILABILITY_STALE_SECONDS
             ):
                 continue
+            base = self.data
             try:
                 state = await self._async_refresh_state_groups()
             except asyncio.CancelledError:
@@ -1287,7 +1316,7 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
                         replace(self.data, available=False)
                     )
                 continue
-            self.async_set_updated_data(state)
+            self._publish_refreshed(base, state)
 
     def _ensure_returning_refresh(self) -> None:
         """Poll lightly while returning because ECOVACS may stop position pushes at dock."""
@@ -1310,7 +1339,7 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
             if not self.data or self.data.activity is not MowerActivity.RETURNING:
                 return
             try:
-                self.async_set_updated_data(await self._async_refresh_state_groups())
+                await self._async_refresh_groups_and_publish()
             except asyncio.CancelledError:
                 raise
             except Exception as err:  # noqa: BLE001 - keep the loop alive
@@ -1783,8 +1812,7 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
             await asyncio.sleep(initial_delay)
             deadline = monotonic() + timeout
             while monotonic() <= deadline:
-                state = await self._async_refresh_state_groups()
-                self.async_set_updated_data(state)
+                state = await self._async_refresh_groups_and_publish()
                 if predicate(state):
                     self._capture_event(
                         "command_outcome_confirmed",
@@ -1818,13 +1846,14 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
         _LOGGER.debug(
             "Refreshing ECOVACS mower state before command because live updates are stale"
         )
-        self.async_set_updated_data(await self._async_refresh_state_groups())
+        await self._async_refresh_groups_and_publish()
 
     async def async_refresh_state(self) -> None:
         """Force a full refresh: state groups, consumables, and totals."""
+        base = self.data
         state = await self._async_refresh_state_groups()
         state = await self._async_refresh_extras(state)
-        self.async_set_updated_data(state)
+        self._publish_refreshed(base, state)
 
     def _startup_getinfo_groups(self) -> tuple[tuple[str, ...], ...]:
         """Return startup getInfo groups adapted to this model's dialect.
