@@ -1818,12 +1818,29 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
             await asyncio.sleep(initial_delay)
             deadline = monotonic() + timeout
             while monotonic() <= deadline:
+                # MQTT usually confirms the outcome within the initial delay;
+                # checking the live state first lets most polls finish without
+                # a single HTTP call — after a dock this loop used to hammer
+                # grouped refreshes for up to four minutes.
+                if self.data is not None and predicate(self.data):
+                    self._capture_event(
+                        "command_outcome_confirmed",
+                        {
+                            "key": key,
+                            "source": "current",
+                            "activity": self.data.activity.value
+                            if self.data.activity is not None
+                            else None,
+                        },
+                    )
+                    return
                 state = await self._async_refresh_groups_and_publish()
                 if predicate(state):
                     self._capture_event(
                         "command_outcome_confirmed",
                         {
                             "key": key,
+                            "source": "refresh",
                             "activity": state.activity.value
                             if state.activity is not None
                             else None,
