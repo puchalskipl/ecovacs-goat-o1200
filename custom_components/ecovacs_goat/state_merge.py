@@ -57,8 +57,13 @@ def merge_refreshed_state(
       payloads, but keys a push updated during the awaits win. Diagnostics
       should describe what actually stands.
     """
-    if base is None or current is None or current is base:
+    if base is None or current is None:
         return refreshed
+    if current is base:
+        # Nothing was published during the awaits — but the clamp must still
+        # run: the sawtooth case is precisely a stale HTTP stats body landing
+        # when base == current (the fresher push came BEFORE the snapshot).
+        return _clamp_session_stats(refreshed, current)
 
     merged: dict[str, Any] = {}
     for field in fields(MowerState):
@@ -87,7 +92,36 @@ def merge_refreshed_state(
             merged[name] = (
                 current_value if current_value != base_value else refreshed_value
             )
-    return replace(refreshed, **merged)
+    return _clamp_session_stats(replace(refreshed, **merged), current)
+
+
+def _clamp_session_stats(merged: MowerState, current: MowerState) -> MowerState:
+    """Never let session progress or area go backwards within one task.
+
+    The field-level merge cannot catch one residual case: the refresher's
+    HTTP ``getStats`` body itself older than an ``onStats`` push that landed
+    *before* the refresher's snapshot (base == current there, so refreshed
+    wins with the older number). Both values are documented-cumulative within
+    a task — area even accumulates across recharge legs sharing a task id —
+    so within one task the larger value is simply the truer one. A new task
+    id releases the clamp so a fresh job may legitimately start from zero.
+    """
+    if merged.task_id is None or merged.task_id != current.task_id:
+        return merged
+    stats = merged.stats
+    clamped: dict[str, Any] = {}
+    for name in ("progress", "area"):
+        merged_value = getattr(stats, name)
+        current_value = getattr(current.stats, name)
+        if (
+            merged_value is not None
+            and current_value is not None
+            and current_value > merged_value
+        ):
+            clamped[name] = current_value
+    if not clamped:
+        return merged
+    return replace(merged, stats=replace(stats, **clamped))
 
 
 def changed_field_names(a: MowerState, b: MowerState) -> tuple[str, ...]:

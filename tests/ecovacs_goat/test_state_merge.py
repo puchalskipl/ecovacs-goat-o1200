@@ -188,3 +188,38 @@ def test_changed_field_names_reports_top_level_diffs() -> None:
     b = replace(a, battery=11, error_code=3)
     assert changed_field_names(a, b) == ("battery", "error_code")
     assert changed_field_names(a, a) == ()
+
+
+def test_session_progress_never_regresses_within_one_task() -> None:
+    """The observed sawtooth: an HTTP getStats body older than a push that
+    landed before the refresher's snapshot (base == current, refreshed wins
+    with the older number). Within one task the larger value is truer."""
+    base = MowerState(task_id="t1", stats=MowerStats(progress=7.0, area=120))
+    refreshed = replace(base, stats=replace(base.stats, progress=6.0, area=110))
+
+    merged = merge_refreshed_state(base, refreshed, base)
+
+    assert merged.stats.progress == 7.0
+    assert merged.stats.area == 120
+
+
+def test_progress_clamp_releases_on_a_new_task_id() -> None:
+    base = MowerState(task_id="t1", stats=MowerStats(progress=90.0))
+    refreshed = replace(
+        base, task_id="t2", stats=replace(base.stats, progress=0.0)
+    )
+
+    merged = merge_refreshed_state(base, refreshed, base)
+
+    assert merged.stats.progress == 0.0
+
+
+def test_clamp_skips_none_values() -> None:
+    base = MowerState(task_id="t1", stats=MowerStats(progress=None, area=50))
+    refreshed = replace(base, stats=replace(base.stats, area=None))
+
+    merged = merge_refreshed_state(base, refreshed, base)
+
+    assert merged.stats.progress is None
+    # area: refreshed says None, current says 50 -> clamp skips (None side),
+    # the plain merge rule already decided; nothing throws.
