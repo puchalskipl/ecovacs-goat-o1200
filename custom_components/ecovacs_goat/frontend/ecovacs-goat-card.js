@@ -1079,13 +1079,27 @@ class EcovacsGoatCard extends HTMLElement {
       const last = value[value.length - 1];
       return `${value.length}:${last?.x ?? ""},${last?.y ?? ""}`;
     };
+    // Segment CONTENT, not just the segment count: the composed border is
+    // two segments (arc + tail) for the whole lap, so counting them alone
+    // froze the drawn ring — it only shrank when an unrelated field (the
+    // mower's position) happened to change the signature. Per-segment point
+    // counts plus the arc's front catch every shortening cheaply.
+    const segmentsSig = (value) => {
+      if (!Array.isArray(value) || !value.length) {
+        return "0";
+      }
+      const lengths = value.map((segment) => segment?.length ?? 0).join(",");
+      const first = value[0];
+      const front = first?.[first.length - 1];
+      return `${lengths}:${front?.x ?? ""},${front?.y ?? ""}`;
+    };
     return [
       mowerState,
       arraySig(resolved.outline),
       arraySig(resolved.obstacles),
       arraySig(resolved.position_history),
-      resolved.pending?.length ?? 0,
-      resolved.border?.length ?? 0,
+      segmentsSig(resolved.pending),
+      segmentsSig(resolved.border),
       JSON.stringify(resolved.current_position ?? null),
       arraySig(resolved.charge_positions),
       arraySig(resolved.uwb_positions),
