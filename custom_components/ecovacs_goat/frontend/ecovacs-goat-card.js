@@ -1613,7 +1613,12 @@ class EcovacsGoatCard extends HTMLElement {
         // midpoint, and the green edge jittered back and forth by a metre
         // (reproduced frame-by-frame from the 2026-09-01 capture).
         const nearLimit = (cell * 8) ** 2;
-        const window = Math.min(24, run.length - 2);
+        // Wide on purpose: after the mower passes the loop's origin it cuts
+        // the never-transmitted tail with ZERO data updates — the marker is
+        // the only thing that can erode the remaining green. The monotonic
+        // memo below keeps a distant mower from biting the ring anyway
+        // (proximity is still required for the trim to advance).
+        const window = Math.min(96, run.length - 2);
         let bestBack = 0;
         let bestDistance = nearLimit + 1;
         for (let back = 1; back <= window; back += 1) {
