@@ -1207,7 +1207,7 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
             if trace_changed:
                 state = self._reset_live_position_segment(state)
                 self._mark_trace_mqtt_applied()
-            self.async_set_updated_data(state)
+            self._publish_refreshed(previous_state, state)
             self._capture_event(
                 "trace_refresh_after_turn",
                 {
@@ -1396,8 +1396,11 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
             if self._has_recent_position_mqtt():
                 continue
             try:
-                state = await self._async_refresh_live_position(self.data)
-                self.async_set_updated_data(self._compact_live_position_segment(state))
+                base = self.data
+                state = await self._async_refresh_live_position(base)
+                self._publish_refreshed(
+                    base, self._compact_live_position_segment(state)
+                )
                 self._trace_update_due = True
                 self._schedule_trace_refresh()
             except asyncio.CancelledError:
@@ -1432,12 +1435,13 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
             )
             return
 
+        base = self.data or self._base_state()
         state = await self._async_request_live_position_stream(
-            self.data or self._base_state(),
+            base,
             reason,
             force=force,
         )
-        self.async_set_updated_data(self._compact_live_position_segment(state))
+        self._publish_refreshed(base, self._compact_live_position_segment(state))
 
     def _extend_live_position_keepalive(
         self,
@@ -1489,7 +1493,8 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
             ):
                 reason = self._live_position_keepalive_reason
                 force = self._live_position_keepalive_force
-                state = self.data or self._base_state()
+                base = self.data or self._base_state()
+                state = base
                 if force or state.activity in LIVE_POSITION_STREAM_ACTIVITIES:
                     try:
                         await self._async_send_app_ping(reason)
@@ -1498,8 +1503,8 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
                             f"{reason}_keepalive",
                             force=force,
                         )
-                        self.async_set_updated_data(
-                            self._compact_live_position_segment(state)
+                        self._publish_refreshed(
+                            base, self._compact_live_position_segment(state)
                         )
                         # Safety net for the plan broadcast: a running job
                         # whose map still has no plan (a lone lane, no border
@@ -1557,12 +1562,13 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
     ) -> None:
         """Run the app-style live map stream request and merge any readbacks."""
         try:
+            base = self.data or self._base_state()
             state = await self._async_request_live_position_stream(
-                self.data or self._base_state(),
+                base,
                 reason,
                 force=force,
             )
-            self.async_set_updated_data(self._compact_live_position_segment(state))
+            self._publish_refreshed(base, self._compact_live_position_segment(state))
         except asyncio.CancelledError:
             raise
         except EcovacsApiError as err:
@@ -1967,8 +1973,9 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
         """Request live map data after MQTT has had time to subscribe."""
         for delay in (5, 10):
             await asyncio.sleep(delay)
-            self.async_set_updated_data(
-                await self._async_refresh_live_map(self.data or self._base_state())
+            base = self.data or self._base_state()
+            self._publish_refreshed(
+                base, await self._async_refresh_live_map(base)
             )
             if self.data and self.data.map.trace.path:
                 return
