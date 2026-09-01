@@ -395,6 +395,7 @@ def compose_border(
     *,
     step: int,
     previous: tuple | None = None,
+    origin_hint: Any | None = None,
 ) -> tuple[tuple, tuple | None, int | None]:
     """Compose the full remaining edge lap from a mid-job arc.
 
@@ -449,12 +450,37 @@ def compose_border(
             return kept, template, lap_start
 
     if points and lap_start is None:
-        front = points[-1]
-        lap_start = min(
-            range(len(template)),
-            key=lambda i: abs(template[i].x - front.x)
-            + abs(template[i].y - front.y),
-        )
+        # Where did the mower break the loop? The front of the first open arc
+        # is only where the mower is NOW — late snapshots put whole cut
+        # stretches into the never-repainted tail (observed 2026-09-01: the
+        # first arc came 1.5 min into a trim and the bottom edge stayed green
+        # for the rest of the job). When the caller knows a better anchor —
+        # a standalone trim always begins its lap at the dock — prefer the
+        # template vertex nearest that hint, as long as the hint actually
+        # lies on the loop.
+        lap_start = None
+        if origin_hint is not None:
+            candidate = min(
+                range(len(template)),
+                key=lambda i: abs(template[i].x - origin_hint.x)
+                + abs(template[i].y - origin_hint.y),
+            )
+            anchor = template[candidate]
+            # The dock sits a step or two off the boundary (measured 0.85 m
+            # on the reference lawn), so the tolerance is generous — the
+            # guard only has to reject hints that are nowhere near the loop.
+            if (
+                abs(anchor.x - origin_hint.x) + abs(anchor.y - origin_hint.y)
+                <= 30 * step
+            ):
+                lap_start = candidate
+        if lap_start is None:
+            front = points[-1]
+            lap_start = min(
+                range(len(template)),
+                key=lambda i: abs(template[i].x - front.x)
+                + abs(template[i].y - front.y),
+            )
 
     if lap_start is None:
         return arc_segments, template, lap_start

@@ -1250,7 +1250,12 @@ class EcovacsGoatCard extends HTMLElement {
     // the app.
     const borderPath = segmentsToPath(
       jobRunning
-        ? this._snapBorderToOutline(garden, pendingBorder, resolved.chainStep)
+        ? this._snapBorderToOutline(
+            garden,
+            pendingBorder,
+            resolved.chainStep,
+            current
+          )
         : []
     );
     const currentPoint = current ? this._project(current, bounds, width, height) : null;
@@ -1541,7 +1546,7 @@ class EcovacsGoatCard extends HTMLElement {
   // the chain — it recolours the lawn boundary by progress — so do the same:
   // keep the outline runs that lie near any remaining border point, drop the
   // rest. The chain only decides WHICH parts of the boundary are pending.
-  _snapBorderToOutline(outline, segments, step) {
+  _snapBorderToOutline(outline, segments, step, mowerPosition) {
     if (!Array.isArray(outline) || outline.length < 3 || !segments.length) {
       return segments;
     }
@@ -1592,6 +1597,26 @@ class EcovacsGoatCard extends HTMLElement {
         run.push(outline[i]);
         if (i === frontIndex) {
           break;
+        }
+      }
+      // The data front trails the mower by one snapshot (10-30 s). When the
+      // live marker sits ON the boundary just short of the run's end, trim
+      // the run back to it — the white edge then rides the once-a-second
+      // position instead of stepping once per snapshot. Bounded to the last
+      // few vertices so a mower elsewhere (detour, other side of the lawn)
+      // cannot bite chunks out of the pending ring.
+      if (mowerPosition && run.length > 3) {
+        const cell = Number(step) > 0 ? Number(step) : 50;
+        const nearLimit = (cell * 4) ** 2;
+        const window = Math.min(24, run.length - 2);
+        for (let back = 1; back <= window; back += 1) {
+          const vertex = run[run.length - 1 - back];
+          const dx = vertex.x - mowerPosition.x;
+          const dy = vertex.y - mowerPosition.y;
+          if (dx * dx + dy * dy <= nearLimit) {
+            run.length = run.length - back;
+            break;
+          }
         }
       }
       return run.length > 1 ? [run] : segments;

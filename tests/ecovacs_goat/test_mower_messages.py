@@ -729,3 +729,26 @@ def test_chunks_from_different_batches_do_not_mix() -> None:
         {"batid": "new", "serial": "2", "index": "1", "info": whole[half:]},
     )
     assert set(state.map.trace.lanes) == {"5"}
+
+
+def test_an_idle_clean_push_does_not_cancel_a_return_to_dock() -> None:
+    """A stopped job's ride home reports cleanState "idle" the whole way.
+
+    Observed 2026-09-01: eight seconds into the return the idle push flipped
+    the entity to IDLE and the tile said "ready — send it to the dock" while
+    the mower was already driving there. Only the charge state may resolve a
+    RETURNING: isCharging=1 lands it as DOCKED.
+    """
+    returning = MowerState(activity=MowerActivity.RETURNING)
+
+    idle_push = '{"body": {"data": {"state": "idle"}}}'
+    state = apply_mqtt_payload(
+        returning, "iot/atr/onCleanInfo/x/y/z/j", idle_push
+    )
+    assert state.activity is MowerActivity.RETURNING
+
+    docked_push = '{"body": {"data": {"isCharging": 1, "mode": "slotCharging"}}}'
+    state = apply_mqtt_payload(
+        state, "iot/atr/onChargeState/x/y/z/j", docked_push
+    )
+    assert state.activity is MowerActivity.DOCKED

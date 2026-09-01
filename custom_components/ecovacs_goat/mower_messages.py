@@ -278,7 +278,12 @@ def apply_command_data(state: MowerState, command: str, data: Any) -> MowerState
                 if isinstance(data.get("subsets"), str):
                     state = replace(state, map=_map_set_layer(state.map, data))
                 elif isinstance(data.get("info"), str):
-                    state = replace(state, map=_map_track_push(state.map, data))
+                    state = replace(
+                        state,
+                        map=_map_track_push(
+                            state.map, data, job_kind=state.clean_type
+                        ),
+                    )
                 else:
                     # Unknown reply shape (e.g. a bare acknowledgement): still
                     # learn the map id like other O-series map replies.
@@ -572,6 +577,14 @@ def _clean_activity(data: dict[str, Any], current: MowerActivity) -> MowerActivi
     if state == "idle":
         if current is MowerActivity.DOCKED:
             return MowerActivity.DOCKED
+        if current is MowerActivity.RETURNING:
+            # A stopped job's ride home: cleanState reports "idle" (no job)
+            # for the whole return — the arrival is signalled by the charge
+            # state, not here. Without this, an idle push cancelled RETURNING
+            # eight seconds into the drive and the tile said "ready — send it
+            # to the dock" while the mower was already on its way (observed
+            # 2026-09-01, ~100 s of nonsense).
+            return MowerActivity.RETURNING
         return MowerActivity.IDLE
     return current
 
@@ -936,7 +949,9 @@ def _decode_map_subset(value: Any) -> Any:
         return None
 
 
-def _map_track_push(current: MowerMap, data: dict[str, Any]) -> MowerMap:
+def _map_track_push(
+    current: MowerMap, data: dict[str, Any], *, job_kind: str | None = None
+) -> MowerMap:
     """Apply an O-series ``onMapTrack`` push: what the mower still has to cut.
 
     Pushes come in two kinds, told apart by the record's second token:
@@ -1025,12 +1040,20 @@ def _map_track_push(current: MowerMap, data: dict[str, Any]) -> MowerMap:
             # Mid-job the mower snapshots only the arc up to the loop's
             # origin; compose the never-transmitted tail from the closed
             # announcement so the drawn remainder covers the whole lap.
+            # A standalone edge trim always begins its lap at the dock, so
+            # the station pins the lap start exactly even when the first
+            # open arc arrives late. The in-mow edge pass starts wherever
+            # the lanes ended — no hint there, the arc front estimates it.
+            origin_hint = None
+            if job_kind == "borderrotate" and current.charge_positions:
+                origin_hint = current.charge_positions[0]
             border, border_template, border_lap_start = compose_border(
                 border_template,
                 border_lap_start,
                 seen_border,
                 step=step,
                 previous=border,
+                origin_hint=origin_hint,
             )
         else:
             lanes.update(seen)

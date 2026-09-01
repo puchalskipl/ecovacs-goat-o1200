@@ -391,3 +391,34 @@ def test_a_stub_at_the_mower_never_replaces_the_border_arc() -> None:
         template, lap_start, stub, step=50, previous=None
     )
     assert stub[0] not in border
+
+
+def test_a_trim_lap_start_is_pinned_by_the_station_hint() -> None:
+    """A standalone trim begins its lap at the dock.
+
+    Observed 2026-09-01: the first open arc of a trim arrived 1.5 minutes in,
+    so the front-based estimate put the whole already-cut bottom edge into
+    the never-repainted tail and it stayed green for the rest of the job.
+    With the station as origin_hint the lap start lands on the dock-adjacent
+    vertex regardless of how late the first arc is.
+    """
+    from custom_components.ecovacs_goat.map_geometry import compose_border
+
+    closed = (TEMPLATE + (MapPosition(x=0, y=100),),)
+    border, template, lap_start = compose_border(None, None, closed, step=50)
+
+    # First open arc arrives LATE: the front is already three vertices in.
+    late_arc = ((TEMPLATE[0], TEMPLATE[1], TEMPLATE[2], TEMPLATE[3]),)
+    station = MapPosition(x=45, y=95)  # dock sits by the (50, 100) vertex
+
+    border, template, lap_start = compose_border(
+        template, None, late_arc, step=50, origin_hint=station
+    )
+    assert lap_start == 7  # the (50, 100) vertex, not the arc front's 3
+
+    # A hint far off the loop is ignored and the front estimate returns.
+    border, template2, lap_start2 = compose_border(
+        template, None, late_arc, step=50,
+        origin_hint=MapPosition(x=5000, y=5000),
+    )
+    assert lap_start2 == 3

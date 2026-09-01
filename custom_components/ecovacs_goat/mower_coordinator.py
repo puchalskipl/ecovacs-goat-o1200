@@ -2166,7 +2166,13 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
             self._capability.clean_body("stop", self.data.clean_type),
             refresh_if_stale=False,
         )
-        self.async_set_updated_data(replace(self.data, activity=MowerActivity.IDLE))
+        # Stop ends the job for good, so clear its type in the optimistic
+        # publish too: leaving the stale "borderrotate"/"auto" for the seconds
+        # until the mower's own push confirmed it made the tile flash through
+        # its default branch ("ready — at the dock" while standing mid-lawn).
+        self.async_set_updated_data(
+            replace(self.data, activity=MowerActivity.IDLE, clean_type=None)
+        )
         self._schedule_outcome_poll(
             "end_mowing",
             lambda state: state.activity in {MowerActivity.IDLE, MowerActivity.DOCKED},
