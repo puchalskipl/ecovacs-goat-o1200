@@ -853,6 +853,14 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
             and data.task_id is not None
             and data.task_id != previous.task_id
             and data.map.trace.lanes
+            # Only a job that is actually starting may discard the plan. A
+            # mid-job id change is never real: it came from a stats payload
+            # naming some other job. Belt and braces alongside ignoring the
+            # last-time-stats cid — losing the plan costs minutes of blank
+            # map, so a wrong wipe is far more expensive than a missed one.
+            and data.activity in (MowerActivity.MOWING, MowerActivity.PAUSED)
+            and previous.activity
+            not in (MowerActivity.MOWING, MowerActivity.PAUSED)
         ):
             data = replace(
                 data,

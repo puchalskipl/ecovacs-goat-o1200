@@ -752,3 +752,33 @@ def test_an_idle_clean_push_does_not_cancel_a_return_to_dock() -> None:
         state, "iot/atr/onChargeState/x/y/z/j", docked_push
     )
     assert state.activity is MowerActivity.DOCKED
+
+
+def test_last_time_stats_never_moves_the_current_task_id() -> None:
+    """Those stats describe the job that FINISHED, not the running one.
+
+    Observed 2026-09-02: right after a recharge resume, onLastTimeStats
+    carried cid=-539017078 (and a grouped refresh carried cid=0) while the
+    real job was cid=122. Taken as the current task id it read as "a new task
+    started", the coordinator wiped the remaining-work plan, and the mower cut
+    for minutes with no lanes drawn.
+    """
+    state = MowerState(task_id="122")
+
+    for payload in (
+        '{"body": {"data": {"cid": -539017078, "area": 120, "time": 3600}}}',
+        '{"body": {"data": {"cid": 0}}}',
+    ):
+        state = apply_mqtt_payload(
+            state, "iot/atr/onLastTimeStats/x/y/z/j", payload
+        )
+        assert state.task_id == "122"
+
+    # The running job's own report still moves it.
+    state = apply_mqtt_payload(
+        state,
+        "iot/atr/onCleanInfo/x/y/z/j",
+        '{"body": {"data": {"state": "clean", "cleanState": '
+        '{"motionState": "working", "content": {"type": "auto"}, "cid": 123}}}}',
+    )
+    assert state.task_id == "123"

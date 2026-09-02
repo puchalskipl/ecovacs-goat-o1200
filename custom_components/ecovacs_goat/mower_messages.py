@@ -226,8 +226,15 @@ def apply_command_data(state: MowerState, command: str, data: Any) -> MowerState
                     ),
                 )
         case "getLastTimeStats" | "onLastTimeStats":
-            if isinstance(data, dict):
-                state = replace(state, task_id=_task_id(data, state.task_id))
+            # Deliberately ignored. These are the stats of the job that
+            # FINISHED, and their cid names that job — not the running one.
+            # Taking it as the current task id flipped task_id to a stale
+            # (often negative or 0) value mid-job, which the coordinator read
+            # as "a new task started" and wiped the whole remaining-work plan:
+            # observed 2026-09-02 right after a recharge resume, the mower
+            # then cut for minutes with no lanes drawn at all. Everything this
+            # push could tell us about the current job comes from cleanInfo.
+            pass
         case "getTotalStats":
             if isinstance(data, dict):
                 state = replace(
