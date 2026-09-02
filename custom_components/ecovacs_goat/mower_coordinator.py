@@ -50,6 +50,8 @@ from .mower_models import (
     AreaParameter,
     MapPosition,
     MowerActivity,
+    active_job_from_payload,
+    active_job_payload,
     MowerDevice,
     MowerLastJob,
     MowerMap,
@@ -515,12 +517,9 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
         if isinstance(active, dict) and active.get("started_at"):
             started = dt_util.parse_datetime(str(active["started_at"]))
             if started is not None:
-                self._active_job = {
-                    "kind": active.get("kind") or JOB_KIND_MOWING,
-                    "started_at": started,
-                    "task_id": active.get("task_id"),
-                    "mowed_peak": float(active.get("mowed_peak") or 0.0),
-                }
+                self._active_job = active_job_from_payload(
+                    active, started, default_kind=JOB_KIND_MOWING
+                )
 
         def positions(value: Any) -> tuple[MapPosition, ...]:
             if not isinstance(value, list):
@@ -627,10 +626,7 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
             "outline_source": mower_map.info.outline_source,
             "chain_step": mower_map.info.chain_step,
             "geometry_version": MAP_GEOMETRY_VERSION,
-            "active_job": {
-                **self._active_job,
-                "started_at": self._active_job["started_at"].isoformat(),
-            }
+            "active_job": active_job_payload(self._active_job)
             if self._active_job
             else None,
             "last_jobs": {

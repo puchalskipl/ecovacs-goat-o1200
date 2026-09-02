@@ -174,6 +174,48 @@ def standstill_bucket(*, mowing: bool, blocked: bool, charging: bool) -> str | N
     return None
 
 
+def active_job_payload(job: dict[str, Any]) -> dict[str, Any]:
+    """Return the persistable form of the job currently being tracked.
+
+    Field by field on purpose. Persisting the in-memory record wholesale used
+    to look equivalent, but it also carried a live sampling timestamp that
+    means nothing across a restart — and, worse, the restore silently read
+    back fewer fields than the save wrote, so the standstill tallies were
+    dropped on every restart (observed 2026-09-02: a restart three minutes
+    before a mow ended erased 82 minutes of charging, and the record claimed
+    the whole 4 h 13 min as mowing). Keeping both ends in one place, over one
+    field list, is what stops that drifting apart again.
+    """
+    started_at = job.get("started_at")
+    return {
+        "kind": job.get("kind"),
+        "started_at": started_at.isoformat() if started_at else None,
+        "task_id": job.get("task_id"),
+        "mowed_peak": float(job.get("mowed_peak") or 0.0),
+        "blocked_seconds": float(job.get("blocked_seconds") or 0.0),
+        "charging_seconds": float(job.get("charging_seconds") or 0.0),
+    }
+
+
+def active_job_from_payload(
+    payload: Any, started_at: Any, *, default_kind: str
+) -> dict[str, Any]:
+    """Rebuild a tracked job from storage, with ``started_at`` already parsed.
+
+    No sampling timestamp comes back: the time Home Assistant was down belongs
+    to no bucket, so sampling restarts from the first update after the reboot.
+    """
+    stored = payload if isinstance(payload, dict) else {}
+    return {
+        "kind": stored.get("kind") or default_kind,
+        "started_at": started_at,
+        "task_id": stored.get("task_id"),
+        "mowed_peak": float(stored.get("mowed_peak") or 0.0),
+        "blocked_seconds": float(stored.get("blocked_seconds") or 0.0),
+        "charging_seconds": float(stored.get("charging_seconds") or 0.0),
+    }
+
+
 @dataclass(frozen=True)
 class MowerLastJob:
     """Summary of the most recently finished job of one kind.

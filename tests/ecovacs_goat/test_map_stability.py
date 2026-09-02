@@ -24,7 +24,13 @@ from custom_components.ecovacs_goat.map_geometry import (
     OUTLINE_SOURCE_MOWER,
     stabilise_geometry,
 )
-from custom_components.ecovacs_goat.mower_models import MapPosition, MowerMapInfo
+from custom_components.ecovacs_goat.mower_models import (
+    MapPosition,
+    MowerMapInfo,
+    active_job_from_payload,
+    active_job_payload,
+    standstill_bucket,
+)
 
 FRESH = (MapPosition(x=0, y=0), MapPosition(x=100, y=0), MapPosition(x=100, y=100))
 STALE = (MapPosition(x=0, y=0), MapPosition(x=9, y=0), MapPosition(x=9, y=9))
@@ -502,3 +508,65 @@ def test_coverage_cells_walk_collapsed_edges() -> None:
         ((MapPosition(x=0, y=0), MapPosition(x=500, y=0)),), step=50
     )
     assert cells == frozenset((i, 0) for i in range(11))
+
+
+def test_an_open_job_survives_a_restart_with_its_standstill_tallies() -> None:
+    """A restart mid-job must not turn standstill into working time.
+
+    Observed 2026-09-02: a restart three minutes before a mow ended erased the
+    82 minutes it had spent charging, and the record claimed the whole
+    4 h 13 min as mowing. The save wrote the tallies; the restore read back
+    fewer fields and dropped them.
+    """
+    from datetime import datetime, timezone
+
+    started = datetime(2026, 9, 2, 10, 30, tzinfo=timezone.utc)
+    job = {
+        "kind": "auto",
+        "started_at": started,
+        "task_id": "122",
+        "mowed_peak": 252.7,
+        "blocked_seconds": 0.0,
+        "charging_seconds": 4900.0,
+        # Only meaningful while running — must not come back.
+        "sampled_at": datetime(2026, 9, 2, 14, 40, tzinfo=timezone.utc),
+    }
+
+    payload = active_job_payload(job)
+    assert payload["started_at"] == started.isoformat()
+    assert "sampled_at" not in payload
+
+    import json
+
+    # It has to survive the storage round trip, not just the function call.
+    restored = active_job_from_payload(
+        json.loads(json.dumps(payload)), started, default_kind="auto"
+    )
+    assert restored["charging_seconds"] == 4900.0
+    assert restored["blocked_seconds"] == 0.0
+    assert restored["mowed_peak"] == 252.7
+    assert restored["task_id"] == "122"
+    assert restored["started_at"] is started
+    assert "sampled_at" not in restored
+
+
+def test_a_job_stored_before_the_tallies_existed_restores_as_zero() -> None:
+    """Records written by the older save carry no tallies at all."""
+    from datetime import datetime, timezone
+
+    started = datetime(2026, 9, 2, 10, 30, tzinfo=timezone.utc)
+    restored = active_job_from_payload(
+        {"kind": "borderrotate", "task_id": "7"}, started, default_kind="auto"
+    )
+    assert restored["kind"] == "borderrotate"
+    assert restored["blocked_seconds"] == 0.0
+    assert restored["charging_seconds"] == 0.0
+    assert restored["mowed_peak"] == 0.0
+
+
+def test_standstill_between_restarts_is_charged_to_nobody() -> None:
+    """Downtime belongs to no bucket, and the buckets still rank correctly."""
+    assert standstill_bucket(mowing=False, blocked=True, charging=True) == "blocked"
+    assert standstill_bucket(mowing=False, blocked=False, charging=True) == "charging"
+    assert standstill_bucket(mowing=True, blocked=False, charging=True) is None
+    assert standstill_bucket(mowing=False, blocked=False, charging=False) is None
