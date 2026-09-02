@@ -149,6 +149,10 @@ Dead ends, so nobody retries them:
   (parked mid-job to recharge — the job stays `state: clean` with
   `motionState: pause`), `continue` (picking an interrupted job back up),
   `workComplete`, `alert`. The reference mower resumes at **80%** battery.
+- `workComplete` + `state: idle` means the job finished AND the mower is about
+  to drive itself home — it stays silent for the whole ride (measured 48 s
+  after an edge trim) until `onChargeState` reports the dock, so map that
+  push to "returning", not "idle".
 - `getBreakPointStatus.continueLeftTime` reads 0 even mid-interruption; it is
   not a countdown to resuming.
 - The mower re-broadcasts its map geometry (`onMI`, `onArI`) when it sees the
