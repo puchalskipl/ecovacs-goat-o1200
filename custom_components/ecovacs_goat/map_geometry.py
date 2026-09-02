@@ -534,6 +534,24 @@ def _densify(segment: tuple, step: int) -> list[MapPosition]:
     return dense
 
 
+def border_coverage_cells(
+    segments: tuple, *, step: int = CHAIN_STEP
+) -> frozenset[tuple[int, int]]:
+    """Return the grid cells a border's polylines pass through.
+
+    Feeds the erosion ratchet: cells present in the previously published
+    border but absent from the new one were cut in the meantime (snapshots
+    only ever shrink), so they join the cut set even when no update named
+    them — otherwise a ring re-announcement resurrects the slivers between
+    sparse updates.
+    """
+    cells = set()
+    for segment in segments or ():
+        for point in _densify(segment, step):
+            cells.add((point.x // step, point.y // step))
+    return frozenset(cells)
+
+
 def erode_border(
     segments: tuple, cut: frozenset[tuple[int, int]], *, step: int = CHAIN_STEP
 ) -> tuple:

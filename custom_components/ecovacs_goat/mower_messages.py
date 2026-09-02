@@ -13,6 +13,7 @@ from typing import Any
 from .map_geometry import (
     CHAIN_STEP,
     OUTLINE_SOURCE_MOWER,
+    border_coverage_cells,
     compose_border,
     cut_cells_from_points,
     erode_border,
@@ -630,6 +631,31 @@ def _clean_trigger(data: dict[str, Any], current: str | None) -> str | None:
     return current
 
 
+def job_plan_completed(
+    previous: MowerState | None, current: MowerState
+) -> bool:
+    """Return whether the mowing job just closed for good.
+
+    True only when the mower leaves MOWING/PAUSED for a non-working state
+    with no job type left. The remaining-work layer (lanes, border, cut
+    cells) is then history and must be cleared — otherwise the last plan
+    lingers and, worse, an end-of-job ring re-announcement repaints the whole
+    lap green (observed live 2026-09-02 at the moment a mow finished).
+
+    Deliberately NOT true for a mid-job recharge break: the job type stays
+    set while the mower pauses to charge, and wiping the plan there is
+    exactly the bug fixed earlier the same day.
+    """
+    if previous is None:
+        return False
+    working = (MowerActivity.MOWING, MowerActivity.PAUSED)
+    return (
+        previous.activity in working
+        and current.activity not in working
+        and current.clean_type is None
+    )
+
+
 def _task_id(data: dict[str, Any], current: str | None) -> str | None:
     """Return the best current mowing task id found in app payloads.
 
@@ -1060,10 +1086,14 @@ def _map_track_push(
             # the station pins the lap start exactly even when the first
             # open arc arrives late. The in-mow edge pass starts wherever
             # the lanes ended — no hint there, the arc front estimates it.
+            if job_kind is None and border == ():
+                # The job is closed and the lap marked done — a late ring
+                # (re-)announcement is archive chatter, not new work. Taking
+                # it would repaint the whole finished lap green.
+                continue
             origin_hint = None
             if job_kind == "borderrotate" and current.charge_positions:
                 origin_hint = current.charge_positions[0]
-            template_before = border_template
             border, border_template, border_lap_start = compose_border(
                 border_template,
                 border_lap_start,
@@ -1072,11 +1102,13 @@ def _map_track_push(
                 previous=border,
                 origin_hint=origin_hint,
             )
-            if border_template != template_before:
-                # A different closed announcement is a new lap: what the old
-                # lap cut says nothing about this one. Compared by content —
-                # the same ring re-announced must not wipe the progress.
-                border_cut = frozenset()
+            # A closed (re-)announcement deliberately does NOT reset the
+            # accumulated cut cells. The mower re-sends the full planned ring
+            # on reconnection mid-job (observed live 2026-09-02 right after an
+            # HA restart: the whole ring flashed back green over a lap already
+            # two-thirds cut) — erosion below immediately rubs the cut cells
+            # back out. A genuinely new job gets its cells cleared by the
+            # coordinator's task-start wipe, not here.
         else:
             lanes.update(seen)
     if fresh_cut:
@@ -1084,6 +1116,16 @@ def _map_track_push(
         border_cut = border_cut | cut_cells_from_points(fresh_cut, step=step)
     if border and border_cut:
         border = erode_border(border, border_cut, step=step)
+    if touched and current.trace.border:
+        # Ratchet: cells the previous border covered but this one does not
+        # were cut in the meantime (the plan only ever shrinks), even when no
+        # update named them. Without this, a mid-job ring re-announcement
+        # resurrects the slivers between sparse updates.
+        lost = border_coverage_cells(
+            current.trace.border, step=step
+        ) - border_coverage_cells(border or (), step=step)
+        if lost:
+            border_cut = border_cut | lost
     if not touched:
         return current
 

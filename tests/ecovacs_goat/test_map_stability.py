@@ -16,6 +16,7 @@ sys.modules.setdefault("custom_components.ecovacs_goat", ecovacs_goat)
 
 from custom_components.ecovacs_goat.map_geometry import (
     OUTLINE_SOURCE_COVERAGE,
+    border_coverage_cells,
     carry_forward_track,
     compose_border,
     cut_cells_from_points,
@@ -492,3 +493,12 @@ def test_a_snapshot_cannot_repaint_cut_ground() -> None:
     ]
     assert not dziura
     assert sum(len(s) for s in eroded) != total_before or len(eroded) > len(border)
+
+
+def test_coverage_cells_walk_collapsed_edges() -> None:
+    """A two-point edge 500 long must cover all 11 cells, not just its ends —
+    the ratchet diffs these sets to learn what a shrinking snapshot cut."""
+    cells = border_coverage_cells(
+        ((MapPosition(x=0, y=0), MapPosition(x=500, y=0)),), step=50
+    )
+    assert cells == frozenset((i, 0) for i in range(11))

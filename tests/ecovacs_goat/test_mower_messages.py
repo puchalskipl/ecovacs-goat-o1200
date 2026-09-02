@@ -782,3 +782,91 @@ def test_last_time_stats_never_moves_the_current_task_id() -> None:
         '{"motionState": "working", "content": {"type": "auto"}, "cid": 123}}}}',
     )
     assert state.task_id == "123"
+
+
+def _ring_record():
+    """A closed octagon ring chain — 8 corners survive the collinear collapse,
+    enough for the closed-announcement size floor."""
+    return ["1", "1", "1;2;0;0,0;4(6)3(3)2(6)1(3)8(6)7(3)6(6)5(3)"]
+
+
+def test_a_ring_reannouncement_does_not_repaint_cut_ground() -> None:
+    """The mower re-sends the full planned ring on reconnection mid-job.
+
+    Observed live 2026-09-02 minutes after an HA restart: the whole ring
+    flashed back green over a lap already two-thirds cut. The accumulated
+    cut cells must survive the announcement and be rubbed back out.
+    """
+    state = apply_mqtt_payload(
+        MowerState(),
+        "iot/atr/onCleanInfo/x/y/z/j",
+        '{"body": {"data": {"state": "clean", "cleanState": '
+        '{"motionState": "working", "content": {"type": "auto"}, "cid": 5}}}}',
+    )
+    state = apply_command_data(
+        state, "onMapTrack", {"mid": "1", "info": _make_subset([_ring_record()])}
+    )
+    ring = state.map.trace.border
+    assert state.map.trace.border_template is not None
+    pelny = sum(len(s) for s in ring)
+
+    # kosiarka melduje skoszenie kawalka wschodniego boku
+    state = apply_command_data(
+        state,
+        "onMapTrack",
+        {"mid": "1", "info": _make_subset([["1", "2", "1;2;0;150,0;4(2)"]])},
+    )
+    assert state.map.trace.border_cut
+    po_cieciu = state.map.trace.border
+    assert sum(len(s) for s in po_cieciu) != pelny or len(po_cieciu) > len(ring)
+    def _ma_dziure(border):
+        pkt = [p for s in border for p in s]
+        return not any(p.y == 0 and 100 <= p.x < 300 for p in pkt)
+    assert _ma_dziure(po_cieciu)
+
+    # ponowne ogloszenie TEGO SAMEGO pierscienia — dziura ma zostac
+    state = apply_command_data(
+        state, "onMapTrack", {"mid": "1", "info": _make_subset([_ring_record()])}
+    )
+    assert _ma_dziure(state.map.trace.border)
+
+
+def test_a_late_ring_announcement_after_the_job_closed_is_ignored() -> None:
+    """Once the lap is marked done (border == ()) with no job running, an
+    archive re-announcement must not repaint it."""
+    from dataclasses import replace as _replace
+
+    state = MowerState()
+    state = _replace(
+        state,
+        clean_type=None,
+        map=_replace(
+            state.map, trace=_replace(state.map.trace, border=())
+        ),
+    )
+    state = apply_command_data(
+        state, "onMapTrack", {"mid": "1", "info": _make_subset([_ring_record()])}
+    )
+    assert state.map.trace.border == ()
+
+
+def test_job_plan_completed_only_on_a_real_job_exit() -> None:
+    from dataclasses import replace as _replace
+
+    from custom_components.ecovacs_goat.mower_messages import job_plan_completed
+    from custom_components.ecovacs_goat.mower_models import MowerActivity
+
+    def stan(activity, clean_type):
+        return _replace(MowerState(), activity=activity, clean_type=clean_type)
+
+    kosi = stan(MowerActivity.MOWING, "auto")
+    # naturalny koniec: schodzi z koszenia, typ zadania juz pusty
+    assert job_plan_completed(kosi, stan(MowerActivity.IDLE, None))
+    assert job_plan_completed(kosi, stan(MowerActivity.RETURNING, None))
+    # pauza w trakcie: to nie koniec
+    assert not job_plan_completed(kosi, stan(MowerActivity.PAUSED, "auto"))
+    # przerwa na ladowanie: typ zadania trwa, planu nie wolno kasowac
+    assert not job_plan_completed(
+        stan(MowerActivity.PAUSED, "auto"), stan(MowerActivity.DOCKED, "auto")
+    )
+    assert not job_plan_completed(None, stan(MowerActivity.IDLE, None))

@@ -43,6 +43,7 @@ from .mower_messages import (
     apply_response,
     body_data,
     decode_payload,
+    job_plan_completed,
     merge_info_chunks,
 )
 from .mower_models import (
@@ -877,6 +878,25 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
                 ),
             )
             self._remembered_track = ({}, None, None, None, frozenset())
+        if job_plan_completed(previous, data):
+            # The job just closed: the remaining-work layer is history. An
+            # end-of-job ring re-announcement would otherwise repaint the
+            # whole lap green. Border () (not None) = the lap is done.
+            data = replace(
+                data,
+                map=replace(
+                    data.map,
+                    trace=replace(
+                        data.map.trace,
+                        lanes={},
+                        border=(),
+                        border_template=None,
+                        border_lap_start=None,
+                        border_cut=frozenset(),
+                    ),
+                ),
+            )
+            self._remembered_track = ({}, (), None, None, frozenset())
         data = self._carry_forward_track(previous, data)
         data = self._carry_forward_map_geometry(previous, data)
         data = self._maybe_update_outline(data)
