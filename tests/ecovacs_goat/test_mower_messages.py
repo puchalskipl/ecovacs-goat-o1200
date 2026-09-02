@@ -870,3 +870,36 @@ def test_job_plan_completed_only_on_a_real_job_exit() -> None:
         stan(MowerActivity.PAUSED, "auto"), stan(MowerActivity.DOCKED, "auto")
     )
     assert not job_plan_completed(None, stan(MowerActivity.IDLE, None))
+
+
+def test_work_complete_reports_the_ride_home_as_returning() -> None:
+    """A job the mower finishes on its own is followed by its own drive back
+    to the dock, announced only as trigger=workComplete + idle (observed
+    2026-09-02: workComplete at 15:43:04, charge state 48 s later). The ride
+    must show as RETURNING, and docking still resolves it.
+    """
+    state = apply_mqtt_payload(
+        MowerState(),
+        "iot/atr/onCleanInfo/x/y/z/j",
+        '{"body": {"data": {"state": "clean", "cleanState": '
+        '{"motionState": "working", "content": {"type": "borderrotate"}}}}}',
+    )
+    assert state.activity is MowerActivity.MOWING
+
+    koniec = '{"body": {"data": {"trigger": "workComplete", "state": "idle"}}}'
+    state = apply_mqtt_payload(state, "iot/atr/onCleanInfo/x/y/z/j", koniec)
+    assert state.activity is MowerActivity.RETURNING
+    # robot wysyla ten push dwukrotnie — drugi nie moze nic zepsuc
+    state = apply_mqtt_payload(state, "iot/atr/onCleanInfo/x/y/z/j", koniec)
+    assert state.activity is MowerActivity.RETURNING
+
+    state = apply_mqtt_payload(
+        state,
+        "iot/atr/onChargeState/x/y/z/j",
+        '{"body": {"data": {"isCharging": 1, "mode": "slot"}}}',
+    )
+    assert state.activity is MowerActivity.DOCKED
+
+    # workComplete z robota juz stojacego w stacji nie wyciaga go ze stacji
+    state = apply_mqtt_payload(state, "iot/atr/onCleanInfo/x/y/z/j", koniec)
+    assert state.activity is MowerActivity.DOCKED

@@ -595,6 +595,16 @@ def _clean_activity(data: dict[str, Any], current: MowerActivity) -> MowerActivi
             # to the dock" while the mower was already on its way (observed
             # 2026-09-01, ~100 s of nonsense).
             return MowerActivity.RETURNING
+        if trigger == "workComplete" and current in (
+            MowerActivity.MOWING,
+            MowerActivity.PAUSED,
+        ):
+            # A job the mower finished on its own: it always drives itself
+            # home next, but says only "idle" for the whole ride (observed
+            # 2026-09-02: workComplete at 15:43:04, charge state 48 s later).
+            # Report the return so the tile does not spend that ride saying
+            # "done — send it to the dock" about a mower already on its way.
+            return MowerActivity.RETURNING
         return MowerActivity.IDLE
     return current
 
