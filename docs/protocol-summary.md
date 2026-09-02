@@ -102,19 +102,23 @@ Each field is `<type>;<subtype>;<id>;<data>`:
   segment, and a lane interrupted by an obstacle simply carries several pairs.
   Joining lanes into one polyline draws lines across whatever lies between
   them (a terrace, the house).
-* subtype `"2"` — a chain-coded shape: the **border lap** that follows the lawn
-  edge, which is the "edge finishing" pass at the end of a mow. It is
-  announced **closed** (first and last cell meet) before the mower starts
-  driving it; from then on each snapshot carries only the **arc from the
-  loop's fixed origin to the mower's front**. The stretch beyond the origin —
-  which the mower cuts last, finishing where it began — is **never
-  transmitted**, so a consumer that draws the arc alone leaves the final
-  quarter of the lawn unpainted. Keep the closed announcement as a template
-  and append the missing tail (see `map_geometry.compose_border`). Because
-  the chain and the outline come from different sources and drift a cell or
-  two apart (worse further from the anchor), the app does not draw the chain
-  itself — it recolours the lawn boundary by progress, and so should the
-  card.
+* subtype `"2"` — a chain-coded shape: the **border lap** that follows the
+  lawn edge (the standalone edge trim, and the edge finishing pass of a mow).
+  It is announced **closed** (first and last cell meet) before the mower
+  starts driving it; snapshots then carry only the **arc from the loop's
+  fixed origin onward** and the stretch beyond the origin is never
+  transmitted, so the remainder is composed from the announcement kept as a
+  template (`map_geometry.compose_border`). Snapshot timing differs by job:
+  the standalone trim shrinks its arc every few seconds, the in-mow pass can
+  hold the same arc for **minutes**. The live progress signal in both is the
+  **updates between snapshots**: each carries the handful of cells the mower
+  just cut — the same signal the app whitens its ring with. The integration
+  accumulates those cells and erodes every composed border with them
+  (`map_geometry.erode_border`), plus a ratchet: any cell that ever left the
+  published border stays cut. That also covers the mower re-announcing the
+  full planned ring on reconnection mid-job — the announcement lands and the
+  cut cells are rubbed straight back out. When the job closes, the whole
+  layer (lanes, border, cut cells) is cleared.
 * a field with an id but no coordinates means that lane is finished.
 
 Dead ends, so nobody retries them:

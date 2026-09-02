@@ -164,13 +164,17 @@ picture the official app does, from four layers:
    they decode — an integration that ignores multi-part pushes shows a plan
    for edge trims but never for a mow.
 
-   The same layer carries the **border lap** — the edge finishing pass. The
-   mower announces the lap closed, then reports only the arc from the loop's
-   fixed origin to its own front; the stretch it cuts last is never sent, so
-   the integration keeps the announcement as a template and completes the
-   remainder from it. The card does not draw that chain directly (it drifts a
-   cell or two from the outline): like the app, it recolours the lawn boundary
-   by progress — green for still to edge, white for done.
+   The same layer carries the **border lap** — the edge pass. The mower
+   announces the lap closed, then snapshots the remaining arc (lagging the
+   cut by minutes during a mow's edge phase) while streaming the cells it has
+   just cut as small updates in between. The integration composes the
+   remainder from the announcement kept as a template, erodes it with the
+   accumulated cut cells (measured half a metre behind the live marker) and
+   ratchets every removed cell, so neither a lagging snapshot nor the ring
+   being re-announced on reconnection can repaint cut ground. The card draws
+   the eroded segments directly — green for still to edge, white for done —
+   shaving only the segment ends within reach of the marker to hide the
+   update lag, and the layer clears as a whole when the job ends.
 4. **Mower and dock** — the mower marker from `onPos`, the dock at the origin
    `(0, 0)`; the dock *is* the coordinate frame's origin, so a docked mower
    legitimately reports `(0, 0)`.
