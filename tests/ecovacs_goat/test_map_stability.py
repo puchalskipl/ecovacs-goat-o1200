@@ -17,6 +17,9 @@ sys.modules.setdefault("custom_components.ecovacs_goat", ecovacs_goat)
 from custom_components.ecovacs_goat.map_geometry import (
     OUTLINE_SOURCE_COVERAGE,
     carry_forward_track,
+    compose_border,
+    cut_cells_from_points,
+    erode_border,
     OUTLINE_SOURCE_MOWER,
     stabilise_geometry,
 )
@@ -422,3 +425,70 @@ def test_a_trim_lap_start_is_pinned_by_the_station_hint() -> None:
         origin_hint=MapPosition(x=5000, y=5000),
     )
     assert lap_start2 == 3
+
+
+def test_a_cut_point_dilates_to_its_nine_cells() -> None:
+    cells = cut_cells_from_points([MapPosition(x=500, y=500)], step=50)
+    assert cells == frozenset(
+        (10 + dx, 10 + dy) for dx in (-1, 0, 1) for dy in (-1, 0, 1)
+    )
+
+
+def test_erosion_splits_a_long_collapsed_edge() -> None:
+    """Template runs collapse straight edges to end points metres apart; a
+    short cut in the middle must still punch a hole through them."""
+    border = ((MapPosition(x=0, y=0), MapPosition(x=2000, y=0)),)
+    cut = cut_cells_from_points([MapPosition(x=1000, y=0)], step=50)
+    eroded = erode_border(border, cut, step=50)
+    assert len(eroded) == 2
+    left, right = eroded
+    assert left[0].x == 0 and left[-1].x < 950
+    assert right[0].x > 1050 and right[-1].x == 2000
+
+
+def test_erosion_without_cut_cells_is_a_no_op() -> None:
+    border = ((MapPosition(x=0, y=0), MapPosition(x=2000, y=0)),)
+    assert erode_border(border, frozenset(), step=50) is border
+
+
+def test_erosion_drops_runs_shorter_than_two_points() -> None:
+    border = ((MapPosition(x=0, y=0), MapPosition(x=100, y=0)),)
+    cut = cut_cells_from_points(
+        [MapPosition(x=0, y=0), MapPosition(x=100, y=0)], step=50
+    )
+    assert erode_border(border, cut, step=50) == ()
+
+
+def test_a_snapshot_cannot_repaint_cut_ground() -> None:
+    """The in-mow edge pass snapshots lag the cut by minutes and the composed
+    tail can span ground long done (observed live 2026-09-02: every snapshot
+    repainted the cut right side green) — erosion by the accumulated cut
+    cells must win over whatever the composition resurrects."""
+    ring = tuple(
+        MapPosition(x=x, y=y)
+        for x, y in [
+            (0, 0), (1000, 0), (2000, 0), (2000, 1000), (2000, 2000),
+            (1000, 2000), (0, 2000), (0, 1000),
+        ]
+    )
+    # zamknieta zapowiedz -> szablon
+    border, template, lap_start = compose_border(
+        None, None, (ring + (MapPosition(x=0, y=50),),), step=50
+    )
+    assert template is not None
+    # otwarty luk od poczatku szablonu -> kompozycja dokleja ogon
+    arc = (ring[:5],)
+    border, template, lap_start = compose_border(
+        template, lap_start, arc, step=50, previous=border
+    )
+    total_before = sum(len(s) for s in border)
+    # kosiarka melduje skoszenie fragmentu ogona
+    cut = cut_cells_from_points(
+        [MapPosition(x=500, y=2000), MapPosition(x=550, y=2000)], step=50
+    )
+    eroded = erode_border(border, cut, step=50)
+    dziura = [
+        p for seg in eroded for p in seg if p.y == 2000 and 450 <= p.x < 650
+    ]
+    assert not dziura
+    assert sum(len(s) for s in eroded) != total_before or len(eroded) > len(border)

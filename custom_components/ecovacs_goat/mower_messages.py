@@ -14,6 +14,8 @@ from .map_geometry import (
     CHAIN_STEP,
     OUTLINE_SOURCE_MOWER,
     compose_border,
+    cut_cells_from_points,
+    erode_border,
     parse_track_record,
     obstacles_from_area_info,
     outline_from_map_info,
@@ -1012,6 +1014,8 @@ def _map_track_push(
     border = current.trace.border
     border_template = current.trace.border_template
     border_lap_start = current.trace.border_lap_start
+    border_cut = current.trace.border_cut
+    fresh_cut: list[MapPosition] = []
     touched = False
     for record in decoded:
         if not isinstance(record, list) or len(record) < 2:
@@ -1026,13 +1030,18 @@ def _map_track_push(
             if parsed.is_chain:
                 # For the border lap the mower sends two different things
                 # under one id: the whole remaining loop in a snapshot, and
-                # a few cells around wherever it is right now in the updates
-                # between them. Only the snapshot describes work left to do;
-                # taking the updates too makes the border flicker between the
-                # full loop and a stub at the mower.
+                # the cells it has just cut in the updates between them.
+                # Only the snapshot describes work left to do — taking an
+                # update as the loop makes the border flicker between the
+                # full loop and a stub at the mower. But the updates are the
+                # live progress signal: their cells are accumulated and
+                # erased from every composed border below.
                 if snapshot:
                     touched = True
                     seen_border = parsed.segments
+                else:
+                    for chain_segment in parsed.segments:
+                        fresh_cut.extend(chain_segment)
                 continue
             touched = True
             if parsed.segments:
@@ -1054,6 +1063,7 @@ def _map_track_push(
             origin_hint = None
             if job_kind == "borderrotate" and current.charge_positions:
                 origin_hint = current.charge_positions[0]
+            template_before = border_template
             border, border_template, border_lap_start = compose_border(
                 border_template,
                 border_lap_start,
@@ -1062,8 +1072,18 @@ def _map_track_push(
                 previous=border,
                 origin_hint=origin_hint,
             )
+            if border_template != template_before:
+                # A different closed announcement is a new lap: what the old
+                # lap cut says nothing about this one. Compared by content —
+                # the same ring re-announced must not wipe the progress.
+                border_cut = frozenset()
         else:
             lanes.update(seen)
+    if fresh_cut:
+        touched = True
+        border_cut = border_cut | cut_cells_from_points(fresh_cut, step=step)
+    if border and border_cut:
+        border = erode_border(border, border_cut, step=step)
     if not touched:
         return current
 
@@ -1075,6 +1095,7 @@ def _map_track_push(
             border=border,
             border_template=border_template,
             border_lap_start=border_lap_start,
+            border_cut=border_cut,
             batch_id=data.get("batid") or current.trace.batch_id,
             serial=str(data.get("serial")) if data.get("serial") else current.trace.serial,
             info_size=_int(data.get("infoSize")) or current.trace.info_size,

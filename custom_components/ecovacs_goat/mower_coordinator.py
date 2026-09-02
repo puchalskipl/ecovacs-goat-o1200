@@ -872,10 +872,11 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
                         border=None,
                         border_template=None,
                         border_lap_start=None,
+                        border_cut=frozenset(),
                     ),
                 ),
             )
-            self._remembered_track = ({}, None, None, None)
+            self._remembered_track = ({}, None, None, None, frozenset())
         data = self._carry_forward_track(previous, data)
         data = self._carry_forward_map_geometry(previous, data)
         data = self._maybe_update_outline(data)
@@ -909,6 +910,7 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
             data.map.trace.border,
             data.map.trace.border_template,
             data.map.trace.border_lap_start,
+            data.map.trace.border_cut,
         )
         published, self._remembered_track = carry_forward_track(
             self._remembered_track,
@@ -918,7 +920,7 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
         )
         if published == incoming:
             return data
-        lanes, border, template, lap_start = published
+        lanes, border, template, lap_start, cut = published
         return replace(
             data,
             map=replace(
@@ -929,6 +931,7 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
                     border=border,
                     border_template=template,
                     border_lap_start=lap_start,
+                    border_cut=cut,
                 ),
             ),
         )

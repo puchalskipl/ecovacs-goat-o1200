@@ -327,6 +327,13 @@ class MowerMapTrace:
     # (the lap's start ≈ its end). The template arc from here back to the
     # origin is the never-transmitted tail.
     border_lap_start: int | None = None
+    # Grid cells (x // step, y // step) the mower reported as freshly cut
+    # edge, accumulated from the chain UPDATES between snapshots. Snapshots
+    # can lag the cut by minutes (the in-mow edge pass refreshes them rarely)
+    # and the composed tail can span ground already cut, so whatever falls in
+    # these cells is erased from the drawn border after every composition —
+    # this is the signal the vendor app whitens its ring with in real time.
+    border_cut: frozenset[tuple[int, int]] = frozenset()
 
     @property
     def pending_segments(self) -> tuple[tuple[MapPosition, ...], ...]:

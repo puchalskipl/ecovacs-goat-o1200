@@ -363,12 +363,12 @@ def carry_forward_track(
     """Decide which remaining-work layer to publish, and what to remember.
 
     ``incoming`` and ``remembered`` are ``(lanes, border, border_template,
-    border_lap_start)`` tuples. Only an
+    border_lap_start, border_cut)`` tuples. Only an
     ``onMapTrack`` push (``from_push``) may move this layer: every other
     publish — grouped refreshes above all — was assembled from a snapshot
     taken seconds earlier and would drag the layer backwards.
 
-    All four travel in the same push, so all four must be carried. Keeping
+    All five travel in the same push, so all five must be carried. Keeping
     only the lanes left the border blanked by every ordinary refresh, and the
     card went on drawing the last loop it happened to catch instead of the
     one still to cut; losing the template would strand compose_border without
@@ -489,3 +489,75 @@ def compose_border(
     if len(missing_tail) >= 2:
         return (*arc_segments, missing_tail), template, lap_start
     return arc_segments, template, lap_start
+
+
+def cut_cells_from_points(
+    points: Any, *, step: int = CHAIN_STEP
+) -> frozenset[tuple[int, int]]:
+    """Return the dilated grid cells covered by freshly-cut edge points.
+
+    Between border snapshots the mower streams the cells it has just cut as
+    small chain updates — the signal the vendor app whitens its ring with in
+    real time. Each point marks its own cell plus the 8 neighbours, so that
+    membership later is a single set lookup while still catching template
+    vertices that sit up to a cell off the cut line.
+    """
+    cells = set()
+    for point in points:
+        cell_x, cell_y = point.x // step, point.y // step
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                cells.add((cell_x + dx, cell_y + dy))
+    return frozenset(cells)
+
+
+def _densify(segment: tuple, step: int) -> list[MapPosition]:
+    """Expand a polyline so consecutive points sit at most ``step`` apart.
+
+    Template runs collapse long straight edges to their end points (metres
+    apart), so cell-level erosion must first restore intermediate points or a
+    short cut would never split a long edge.
+    """
+    if len(segment) < 2:
+        return list(segment)
+    dense: list[MapPosition] = [segment[0]]
+    for start, end in zip(segment, segment[1:]):
+        span = max(abs(end.x - start.x), abs(end.y - start.y))
+        pieces = max(1, -(-span // step))
+        for i in range(1, pieces + 1):
+            dense.append(
+                MapPosition(
+                    x=start.x + (end.x - start.x) * i // pieces,
+                    y=start.y + (end.y - start.y) * i // pieces,
+                )
+            )
+    return dense
+
+
+def erode_border(
+    segments: tuple, cut: frozenset[tuple[int, int]], *, step: int = CHAIN_STEP
+) -> tuple:
+    """Erase the already-cut cells from a composed border.
+
+    Snapshots of the in-mow edge pass can lag the cut by minutes, and the
+    composed tail can span ground long done (observed live 2026-09-02: every
+    snapshot repainted the cut right side green for the rest of the job) — so
+    after every composition, whatever falls in the accumulated cut cells is
+    rubbed out. Surviving runs are re-simplified; runs shorter than 2 points
+    are dropped.
+    """
+    if not segments or not cut:
+        return segments
+    eroded: list[tuple[MapPosition, ...]] = []
+    for segment in segments:
+        run: list[MapPosition] = []
+        for point in _densify(segment, step):
+            if (point.x // step, point.y // step) in cut:
+                if len(run) >= 2:
+                    eroded.append(drop_collinear(run))
+                run = []
+            else:
+                run.append(point)
+        if len(run) >= 2:
+            eroded.append(drop_collinear(run))
+    return tuple(eroded)
