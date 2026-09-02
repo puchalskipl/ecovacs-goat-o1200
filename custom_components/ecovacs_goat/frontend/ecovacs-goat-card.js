@@ -1547,175 +1547,95 @@ class EcovacsGoatCard extends HTMLElement {
   // keep the outline runs that lie near any remaining border point, drop the
   // rest. The chain only decides WHICH parts of the boundary are pending.
   _snapBorderToOutline(outline, segments, step, mowerPosition) {
-    if (!Array.isArray(outline) || outline.length < 3 || !segments.length) {
+    // The integration is now authoritative about what remains of the edge
+    // lap: it erodes the border with the mower's own just-cut-cells stream
+    // and ratchets every removed cell (trail measured 0.5 m behind the live
+    // marker). So this draws the data as-is. The old outline-walk
+    // reconstruction is gone — it rebuilt one continuous run from lap start
+    // to data front and resurrected every erosion hole in between (observed
+    // live 2026-09-02: green stretch riding just behind the mower).
+    if (!segments.length) {
       return segments;
     }
     const cell = Number(step) > 0 ? Number(step) : 50;
-    const nearestIndex = (target) => {
-      let best = 0;
-      let bestDistance = Infinity;
-      for (let i = 0; i < outline.length; i += 1) {
-        const dx = outline[i].x - target.x;
-        const dy = outline[i].y - target.y;
-        const distance = dx * dx + dy * dy;
-        if (distance < bestDistance) {
-          bestDistance = distance;
-          best = i;
-        }
-      }
-      return best;
-    };
     const first = segments[0];
-    if (segments.length === 1 && first.length > 2) {
+    if (
+      segments.length === 1 &&
+      first.length > 2 &&
+      Array.isArray(outline) &&
+      outline.length >= 3
+    ) {
       const head = first[0];
       const tail = first[first.length - 1];
       if (Math.abs(head.x - tail.x) + Math.abs(head.y - tail.y) <= 2 * cell) {
-        // The closed announcement: the whole lap is ahead — one full ring.
+        // The closed announcement: the whole lap is ahead — draw it as the
+        // outline ring so it hugs the lawn boundary exactly.
         return [outline.concat([outline[0]])];
       }
     }
-    if (segments.length >= 2) {
-      // Composed remainder: a leading arc (origin -> mower's front) plus the
-      // template tail (lap start -> origin). The stretch of boundary between
-      // the front and the lap start is exactly what has been cut, so walk
-      // the ring from the lap start through the origin to the front and skip
-      // nothing else — gap edges come from topology, not from a distance
-      // threshold that used to swallow the young gap early in the job.
-      const count = outline.length;
-      const originIndex = nearestIndex(first[0]);
-      const arcSegment = segments[segments.length - 2];
-      const frontIndex = nearestIndex(arcSegment[arcSegment.length - 1]);
-      const startIndex = nearestIndex(segments[segments.length - 1][0]);
-      if (frontIndex === startIndex) {
-        return [outline.concat([outline[0]])];
+    // Collapsed straight edges span metres, so freshness shaving needs the
+    // intermediate points back.
+    const densify = (segment) => {
+      if (segment.length < 2) {
+        return segment.slice();
       }
-      const forwardToOrigin = (originIndex - startIndex + count) % count;
-      const forwardToFront = (frontIndex - startIndex + count) % count;
-      const direction = forwardToOrigin <= forwardToFront ? 1 : -1;
-      const run = [];
-      for (let i = startIndex; ; i = (i + direction + count) % count) {
-        run.push(outline[i]);
-        if (i === frontIndex) {
-          break;
-        }
-      }
-      // The data front trails the mower by one snapshot (10-30 s). When the
-      // live marker sits ON the boundary just short of the run's end, trim
-      // the run back to it — the white edge then rides the once-a-second
-      // position instead of stepping once per snapshot. Bounded to the last
-      // few vertices so a mower elsewhere (detour, other side of the lawn)
-      // cannot bite chunks out of the pending ring.
-      if (mowerPosition && run.length > 3) {
-        const cell = Number(step) > 0 ? Number(step) : 50;
-        // Generous: outline vertices sit ~8 cells apart, so a mower halfway
-        // between two of them must still register — a limit near half the
-        // spacing made the trim latch and release as the mower crossed each
-        // midpoint, and the green edge jittered back and forth by a metre
-        // (reproduced frame-by-frame from the 2026-09-01 capture).
-        const nearLimit = (cell * 8) ** 2;
-        // Wide on purpose: after the mower passes the loop's origin it cuts
-        // the never-transmitted tail with ZERO data updates — the marker is
-        // the only thing that can erode the remaining green. The monotonic
-        // memo below keeps a distant mower from biting the ring anyway
-        // (proximity is still required for the trim to advance).
-        const window = Math.min(96, run.length - 2);
-        let bestBack = 0;
-        let bestDistance = nearLimit + 1;
-        for (let back = 1; back <= window; back += 1) {
-          const vertex = run[run.length - 1 - back];
-          const dx = vertex.x - mowerPosition.x;
-          const dy = vertex.y - mowerPosition.y;
-          const distance = dx * dx + dy * dy;
-          if (distance < bestDistance) {
-            bestDistance = distance;
-            bestBack = back;
-          }
-        }
-        // Monotonic per data-front: the mower only ever advances between
-        // snapshots, so within one front the trim may grow but never
-        // shrink — otherwise every corner (where the mower swings off the
-        // boundary line) released the trim and the green edge jumped back.
-        let back = bestDistance <= nearLimit ? bestBack : 0;
-        const memo = this._borderTrimMemo;
-        if (memo) {
-          if (memo.front === frontIndex) {
-            back = Math.max(back, memo.back);
-          } else {
-            // A new snapshot advanced the data front by k vertices; the
-            // mower's true position moved WITH it, so the remembered trim
-            // carries over reduced by that advance instead of resetting.
-            // Without this, a snapshot landing while the mower rounds a
-            // corner (off the boundary line) snapped the white edge back
-            // to the raw data front for up to half a minute.
-            const advance = ((memo.front - frontIndex) * direction + count) % count;
-            if (advance > 0 && advance <= window) {
-              back = Math.max(back, memo.back - advance);
-            }
-          }
-        }
-        if (back > 0) {
-          run.length = run.length - Math.min(back, run.length - 2);
-        }
-        this._borderTrimMemo = { front: frontIndex, back };
-      }
-      return run.length > 1 ? [run] : segments;
-    }
-    // Single open segment (no template after a mid-job restart, or only the
-    // tail once the mower passed the origin): fall back to proximity.
-    const limit = (cell * 8) ** 2;
-    // Straight stretches survive the decoder as their two endpoints only, so
-    // nearness must be measured against the chain's edges, not its points.
-    const edges = [];
-    for (const segment of segments) {
+      const dense = [segment[0]];
       for (let i = 1; i < segment.length; i += 1) {
-        edges.push([segment[i - 1], segment[i]]);
-      }
-      if (segment.length === 1) {
-        edges.push([segment[0], segment[0]]);
-      }
-    }
-    const nearAnyEdge = (vertex) =>
-      edges.some(([a, b]) => {
-        const abx = b.x - a.x;
-        const aby = b.y - a.y;
-        const length2 = abx * abx + aby * aby;
-        let t = 0;
-        if (length2 > 0) {
-          t = ((vertex.x - a.x) * abx + (vertex.y - a.y) * aby) / length2;
-          t = Math.max(0, Math.min(1, t));
+        const a = segment[i - 1];
+        const b = segment[i];
+        const span = Math.max(Math.abs(b.x - a.x), Math.abs(b.y - a.y));
+        const pieces = Math.max(1, Math.ceil(span / cell));
+        for (let k = 1; k <= pieces; k += 1) {
+          dense.push({
+            x: a.x + ((b.x - a.x) * k) / pieces,
+            y: a.y + ((b.y - a.y) * k) / pieces,
+          });
         }
-        const dx = vertex.x - (a.x + t * abx);
-        const dy = vertex.y - (a.y + t * aby);
-        return dx * dx + dy * dy <= limit;
-      });
-    const pendingAt = outline.map(nearAnyEdge);
-    if (pendingAt.every(Boolean)) {
-      // The whole lap is ahead: one closed ring.
-      return [outline.concat([outline[0]])];
-    }
-    // Start on a gap so a run never straddles the array seam, then collect
-    // consecutive pending vertices into ring-ordered polylines.
-    const start = pendingAt.findIndex((flag) => !flag);
-    const runs = [];
-    let run = null;
-    for (let offset = 0; offset < outline.length; offset += 1) {
-      const index = (start + offset) % outline.length;
-      if (pendingAt[index]) {
-        if (!run) {
-          run = [];
-        }
-        run.push(outline[index]);
-      } else if (run) {
-        if (run.length > 1) {
-          runs.push(run);
-        }
-        run = null;
+      }
+      return dense;
+    };
+    const polylineLength = (points) => {
+      let total = 0;
+      for (let i = 1; i < points.length; i += 1) {
+        total += Math.hypot(
+          points[i].x - points[i - 1].x,
+          points[i].y - points[i - 1].y
+        );
+      }
+      return total;
+    };
+    // The data trails the mower by one update (~0.5–1 m). Shave segment ENDS
+    // that sit within reach of the live marker so the white edge rides the
+    // once-a-second position. Ends only, never the middle: a mower merely
+    // driving past an intact stretch (lane phase, transit) must not punch
+    // holes the data does not confirm.
+    const nearLimit = (cell * 16) ** 2;
+    const nearMower = (point) =>
+      mowerPosition &&
+      (point.x - mowerPosition.x) ** 2 + (point.y - mowerPosition.y) ** 2 <=
+        nearLimit;
+    const result = [];
+    for (const segment of segments) {
+      let dense = densify(segment);
+      // Erosion leaves the odd 1–2 cell sliver between holes — off-line
+      // jitter the cut corridor missed. Real remainders are longer.
+      if (dense.length < 2 || polylineLength(dense) < 4 * cell) {
+        continue;
+      }
+      let lo = 0;
+      let hi = dense.length - 1;
+      while (lo < hi && nearMower(dense[lo])) {
+        lo += 1;
+      }
+      while (hi > lo && nearMower(dense[hi])) {
+        hi -= 1;
+      }
+      const kept = dense.slice(lo, hi + 1);
+      if (kept.length >= 2 && polylineLength(kept) >= 2 * cell) {
+        result.push(kept);
       }
     }
-    if (run && run.length > 1) {
-      runs.push(run);
-    }
-    return runs;
+    return result;
   }
 
   _positions(value) {
