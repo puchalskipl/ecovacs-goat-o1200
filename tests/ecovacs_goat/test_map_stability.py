@@ -23,6 +23,7 @@ from custom_components.ecovacs_goat.map_geometry import (
     erode_border,
     OUTLINE_SOURCE_MOWER,
     stabilise_geometry,
+    trail_cells,
 )
 from custom_components.ecovacs_goat.mower_models import (
     MapPosition,
@@ -252,7 +253,7 @@ def test_the_border_tail_beyond_the_origin_is_composed_from_the_template() -> No
 
 
 def test_job_duration_covers_the_whole_session_including_the_recharge() -> None:
-    """Mirrors MowerCoordinator._track_job_lifecycle.
+    """The merge decision comes from mower_models.continues_task.
 
     A session split by a mid-job recharge is one job: it began at the first
     leg and ended at the last, and the reported time is the span between —
@@ -261,10 +262,23 @@ def test_job_duration_covers_the_whole_session_including_the_recharge() -> None:
     """
     from datetime import datetime, timedelta, timezone
 
+    from custom_components.ecovacs_goat.mower_models import (
+        MowerLastJob,
+        continues_task,
+    )
+
     first_leg_start = datetime(2026, 8, 28, 8, 0, tzinfo=timezone.utc)
     recharge_start = first_leg_start + timedelta(minutes=90)
     last_leg_start = recharge_start + timedelta(minutes=80)
     ended = last_leg_start + timedelta(minutes=85)
+
+    first_leg = MowerLastJob(
+        kind="auto",
+        started_at=first_leg_start.isoformat(),
+        ended_at=recharge_start.isoformat(),
+        task_id="122",
+    )
+    assert continues_task(first_leg, "122", last_leg_start)
 
     # What the coordinator computes for the final leg, given the earlier one.
     started = min(last_leg_start, first_leg_start)
@@ -272,6 +286,56 @@ def test_job_duration_covers_the_whole_session_including_the_recharge() -> None:
 
     assert started == first_leg_start
     assert duration == 255.0  # 4 h 15 min wall clock, not 85 minutes
+
+
+def test_a_reused_task_id_does_not_glue_two_days_of_mowing_together() -> None:
+    """Exercises mower_models.continues_task.
+
+    Observed live 2026-09-04: the mower reported cid 122 as the task id of
+    Wednesday's mow, of the edge trim that followed it, and of Friday's mow.
+    Merging on a matching id alone therefore backdated Friday's four-hour
+    session to Wednesday lunchtime and reported it as 49 h 40 min. Legs of one
+    task are separated by a recharge and nothing else, so they must touch in
+    time as well.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from custom_components.ecovacs_goat.mower_models import (
+        JOB_LEG_MAX_GAP_SECONDS,
+        MowerLastJob,
+        continues_task,
+    )
+
+    wednesday = MowerLastJob(
+        kind="auto",
+        started_at="2026-09-02T10:30:00.951796+00:00",
+        ended_at="2026-09-02T14:43:18+00:00",
+        task_id="122",
+    )
+    friday_start = datetime(2026, 9, 4, 8, 0, tzinfo=timezone.utc)
+    assert not continues_task(wednesday, "122", friday_start)
+
+    # A recharge gap still merges, right up to the cutoff.
+    ended_at = datetime.fromisoformat(wednesday.ended_at)
+    assert continues_task(wednesday, "122", ended_at + timedelta(minutes=80))
+    assert continues_task(
+        wednesday, "122", ended_at + timedelta(seconds=JOB_LEG_MAX_GAP_SECONDS)
+    )
+    assert not continues_task(
+        wednesday, "122", ended_at + timedelta(seconds=JOB_LEG_MAX_GAP_SECONDS + 1)
+    )
+
+    # A different task never merges, however close in time.
+    assert not continues_task(wednesday, "123", ended_at + timedelta(minutes=1))
+    assert not continues_task(wednesday, None, ended_at + timedelta(minutes=1))
+    assert not continues_task(None, "122", friday_start)
+
+    # A leg cannot precede the record it would continue, and a record written
+    # before these fields existed cannot vouch for anything.
+    assert not continues_task(wednesday, "122", ended_at - timedelta(minutes=1))
+    assert not continues_task(
+        MowerLastJob(kind="auto", task_id="122"), "122", friday_start
+    )
 
 
 def test_a_restart_mid_job_must_not_reset_the_clock() -> None:
@@ -499,6 +563,115 @@ def test_a_snapshot_cannot_repaint_cut_ground() -> None:
     ]
     assert not dziura
     assert sum(len(s) for s in eroded) != total_before or len(eroded) > len(border)
+
+
+RING = tuple(
+    MapPosition(x=x, y=y)
+    for x, y in [(0, 0), (2000, 0), (2000, 2000), (0, 2000), (0, 0)]
+)
+
+
+def test_the_lap_between_two_cut_updates_is_cut_too() -> None:
+    """The updates only sample the cut: a few cells every couple of seconds
+    while the mower drives two to three times as far (2026-09-02 trim
+    capture: 5 cells per update, 14 driven in between). Eroding by the
+    updates alone left a sliver between every two of them and the ring drew
+    dashed all round (observed live 2026-09-04, in-mow edge pass). The lap
+    between consecutive updates was driven, so it is cut."""
+    first = [MapPosition(x=500, y=0), MapPosition(x=550, y=0)]
+    second = [MapPosition(x=1200, y=0), MapPosition(x=1250, y=0)]
+    cells = trail_cells((RING,), first + second, step=50, closed=True)
+    # kazda komorka gornej krawedzi miedzy aktualizacjami jest skoszona
+    assert all((x // 50, 0) in cells for x in range(500, 1300, 50))
+    # a reszta pierscienia nie
+    assert (40, 20) not in cells
+    assert (20, 40) not in cells
+
+
+def test_the_trail_takes_the_short_way_round_a_closed_ring() -> None:
+    """Across the ring's closing point the bridge must not go the long way
+    round and wipe the whole lap."""
+    cells = trail_cells(
+        (RING,),
+        [MapPosition(x=0, y=100), MapPosition(x=100, y=0)],
+        step=50,
+        closed=True,
+    )
+    assert (0, 0) in cells and (0, 1) in cells and (1, 0) in cells
+    assert (20, 0) not in cells and (40, 20) not in cells
+
+
+def test_updates_far_apart_along_the_lap_are_not_bridged() -> None:
+    """Two updates half a lap apart did not come from a drive along the
+    edge between them (the mower went elsewhere), so nothing is filled."""
+    big = tuple(
+        MapPosition(x=x, y=y)
+        for x, y in [(0, 0), (5000, 0), (5000, 5000), (0, 5000), (0, 0)]
+    )
+    cells = trail_cells(
+        (big,),
+        [MapPosition(x=0, y=0), MapPosition(x=5000, y=5000)],
+        step=50,
+        closed=True,
+    )
+    assert cells == frozenset()
+
+
+def test_an_update_off_the_lap_breaks_the_trail() -> None:
+    """A cut reported nowhere near the lap (relocalisation blip, another
+    shape) is not snapped to it, and the next update starts a new trail."""
+    cells = trail_cells(
+        (RING,),
+        [
+            MapPosition(x=500, y=0),
+            MapPosition(x=1000, y=1000),
+            MapPosition(x=1200, y=0),
+        ],
+        step=50,
+        closed=True,
+    )
+    assert cells == frozenset()
+
+
+def test_without_a_template_the_trail_follows_the_composed_segments() -> None:
+    """Restart mid-job: no ring announced, the arc is all there is. Bridging
+    works within a segment and never jumps between two."""
+    arc = (MapPosition(x=0, y=0), MapPosition(x=2000, y=0))
+    tail = (MapPosition(x=0, y=1000), MapPosition(x=2000, y=1000))
+    cells = trail_cells(
+        (arc, tail),
+        [
+            MapPosition(x=500, y=0),
+            MapPosition(x=1000, y=0),
+            MapPosition(x=1000, y=1000),
+        ],
+        step=50,
+    )
+    assert all((x // 50, 0) in cells for x in range(500, 1050, 50))
+    assert (20, 10) not in cells and (20, 20) not in cells
+
+
+def test_a_sliver_between_two_cut_stretches_is_rubbed_out() -> None:
+    """What sparse sampling leaves between two updates is not edge still to
+    cut; a run at the segment's own end is (that is the lap's front)."""
+    border = ((MapPosition(x=0, y=0), MapPosition(x=5000, y=0)),)
+    cut = cut_cells_from_points(
+        [MapPosition(x=x, y=0) for x in range(1000, 1500, 50)]
+        + [MapPosition(x=x, y=0) for x in range(1900, 2400, 50)],
+        step=50,
+    )
+    eroded = erode_border(border, cut, step=50)
+    assert len(eroded) == 2
+    assert eroded[0][0].x == 0 and eroded[-1][-1].x == 5000
+    assert not any(1500 <= p.x <= 1900 for seg in eroded for p in seg)
+
+    # Metres of edge between two cut stretches are still to cut.
+    cut = cut_cells_from_points(
+        [MapPosition(x=x, y=0) for x in range(1000, 1500, 50)]
+        + [MapPosition(x=x, y=0) for x in range(3000, 3500, 50)],
+        step=50,
+    )
+    assert len(erode_border(border, cut, step=50)) == 3
 
 
 def test_coverage_cells_walk_collapsed_edges() -> None:

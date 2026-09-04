@@ -831,6 +831,65 @@ def test_a_ring_reannouncement_does_not_repaint_cut_ground() -> None:
     assert _ma_dziure(state.map.trace.border)
 
 
+def test_consecutive_cut_updates_erase_the_lap_between_them() -> None:
+    """The updates are a few cells every couple of seconds while the mower
+    drives further, so erasing only what they name left a sliver between
+    every two of them — the ring came out dashed all round (observed live
+    2026-09-04, in-mow edge pass). The lap between one update and the next
+    was driven, so it goes too; the front of the last update is remembered
+    across pushes for that.
+    """
+    state = apply_mqtt_payload(
+        MowerState(),
+        "iot/atr/onCleanInfo/x/y/z/j",
+        '{"body": {"data": {"state": "clean", "cleanState": '
+        '{"motionState": "working", "content": {"type": "auto"}, "cid": 5}}}}',
+    )
+    state = apply_command_data(
+        state, "onMapTrack", {"mid": "1", "info": _make_subset([_ring_record()])}
+    )
+    # dwie aktualizacje na gornym boku, z przerwa 150 miedzy nimi
+    state = apply_command_data(
+        state,
+        "onMapTrack",
+        {"mid": "1", "info": _make_subset([["1", "2", "1;2;0;50,0;4"]])},
+    )
+    assert state.map.trace.border_cut_front == MapPosition(x=100, y=0)
+    state = apply_command_data(
+        state,
+        "onMapTrack",
+        {"mid": "1", "info": _make_subset([["1", "2", "1;2;0;250,0;4"]])},
+    )
+    assert state.map.trace.border_cut_front == MapPosition(x=300, y=0)
+    pkt = [p for s in state.map.trace.border for p in s]
+    # caly gorny bok zniknal, bez drzazgi miedzy aktualizacjami
+    assert not any(p.y == 0 and 0 < p.x < 300 for p in pkt)
+    # reszta pierscienia stoi
+    assert any(p.x == -150 for p in pkt)
+
+
+def test_a_one_cell_cut_update_still_says_where_the_mower_is() -> None:
+    """Between snapshots the mower sometimes reports a single cell (anchor,
+    no chain); it carries no shape but it is a point on the trail."""
+    state = apply_mqtt_payload(
+        MowerState(),
+        "iot/atr/onCleanInfo/x/y/z/j",
+        '{"body": {"data": {"state": "clean", "cleanState": '
+        '{"motionState": "working", "content": {"type": "auto"}, "cid": 5}}}}',
+    )
+    state = apply_command_data(
+        state, "onMapTrack", {"mid": "1", "info": _make_subset([_ring_record()])}
+    )
+    state = apply_command_data(
+        state,
+        "onMapTrack",
+        {"mid": "1", "info": _make_subset([["1", "2", "1;2;0;150,0;"]])},
+    )
+    assert state.map.trace.border_cut_front == MapPosition(x=150, y=0)
+    pkt = [p for s in state.map.trace.border for p in s]
+    assert not any(p.y == 0 and 100 <= p.x <= 200 for p in pkt)
+
+
 def test_a_late_ring_announcement_after_the_job_closed_is_ignored() -> None:
     """Once the lap is marked done (border == ()) with no job running, an
     archive re-announcement must not repaint it."""

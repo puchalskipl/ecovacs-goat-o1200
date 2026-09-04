@@ -112,13 +112,20 @@ Each field is `<type>;<subtype>;<id>;<data>`:
   the standalone trim shrinks its arc every few seconds, the in-mow pass can
   hold the same arc for **minutes**. The live progress signal in both is the
   **updates between snapshots**: each carries the handful of cells the mower
-  just cut — the same signal the app whitens its ring with. The integration
-  accumulates those cells and erodes every composed border with them
-  (`map_geometry.erode_border`), plus a ratchet: any cell that ever left the
-  published border stays cut. That also covers the mower re-announcing the
-  full planned ring on reconnection mid-job — the announcement lands and the
-  cut cells are rubbed straight back out. When the job closes, the whole
-  layer (lanes, border, cut cells) is cleared.
+  just cut — the same signal the app whitens its ring with. They only
+  **sample** the cut, though: ~5 cells every couple of seconds while the
+  mower drives ~14 in between (a one-cell update arrives as an anchor with
+  no chain), so the integration also cuts the lap between one update and
+  the next (`map_geometry.trail_cells`: consecutive updates snapped to the
+  announced ring, the short way round, never over more than 5 m) — eroding
+  by the updates alone left a sliver between every two and the ring drew
+  dashed all round. The accumulated cells erode every composed border
+  (`map_geometry.erode_border`; a run under 1 m hemmed in by cut on both
+  sides is dropped as sampling noise), plus a ratchet: any cell that ever
+  left the published border stays cut. That also covers the mower
+  re-announcing the full planned ring on reconnection mid-job — the
+  announcement lands and the cut cells are rubbed straight back out. When
+  the job closes, the whole layer (lanes, border, cut cells) is cleared.
 * a field with an id but no coordinates means that lane is finished.
 
 Dead ends, so nobody retries them:

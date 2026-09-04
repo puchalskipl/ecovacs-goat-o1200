@@ -20,6 +20,7 @@ from .map_geometry import (
     parse_track_record,
     obstacles_from_area_info,
     outline_from_map_info,
+    trail_cells,
 )
 from .mower_models import (
     AreaParameter,
@@ -1076,8 +1077,16 @@ def _map_track_push(
                     touched = True
                     seen_border = parsed.segments
                 else:
-                    for chain_segment in parsed.segments:
-                        fresh_cut.extend(chain_segment)
+                    stub = [
+                        point
+                        for chain_segment in parsed.segments
+                        for point in chain_segment
+                    ]
+                    if not stub and parsed.anchor is not None:
+                        # A one-cell update has no shape, but it still says
+                        # where the mower is — the trail below needs it.
+                        stub = [parsed.anchor]
+                    fresh_cut.extend(stub)
                 continue
             touched = True
             if parsed.segments:
@@ -1121,9 +1130,24 @@ def _map_track_push(
             # coordinator's task-start wipe, not here.
         else:
             lanes.update(seen)
+    cut_front = current.trace.border_cut_front
     if fresh_cut:
         touched = True
         border_cut = border_cut | cut_cells_from_points(fresh_cut, step=step)
+        # The updates only sample the cut: a few cells every couple of
+        # seconds while the mower drives two to three times that far. The
+        # lap between the previous update and this one was driven too, so
+        # it is cut as well — otherwise a sliver survives between every two
+        # updates and the ring draws dashed (observed live 2026-09-04 during
+        # the in-mow edge pass, whose snapshots stand still for minutes).
+        reference = (border_template,) if border_template else (border or ())
+        border_cut = border_cut | trail_cells(
+            reference,
+            ([cut_front] if cut_front is not None else []) + fresh_cut,
+            step=step,
+            closed=border_template is not None,
+        )
+        cut_front = fresh_cut[-1]
     if border and border_cut:
         border = erode_border(border, border_cut, step=step)
     if touched and current.trace.border:
@@ -1148,6 +1172,7 @@ def _map_track_push(
             border_template=border_template,
             border_lap_start=border_lap_start,
             border_cut=border_cut,
+            border_cut_front=cut_front,
             batch_id=data.get("batid") or current.trace.batch_id,
             serial=str(data.get("serial")) if data.get("serial") else current.trace.serial,
             info_size=_int(data.get("infoSize")) or current.trace.info_size,

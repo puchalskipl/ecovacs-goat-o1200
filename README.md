@@ -167,11 +167,14 @@ picture the official app does, from four layers:
    The same layer carries the **border lap** — the edge pass. The mower
    announces the lap closed, then snapshots the remaining arc (lagging the
    cut by minutes during a mow's edge phase) while streaming the cells it has
-   just cut as small updates in between. The integration composes the
-   remainder from the announcement kept as a template, erodes it with the
-   accumulated cut cells (measured half a metre behind the live marker) and
-   ratchets every removed cell, so neither a lagging snapshot nor the ring
-   being re-announced on reconnection can repaint cut ground. The card draws
+   just cut as small updates in between. Those updates only sample the cut
+   (a few cells every couple of seconds, the mower drives further in
+   between), so the integration also cuts the lap between one update and
+   the next along the announced ring. It composes the remainder from the
+   announcement kept as a template, erodes it with the accumulated cut
+   cells (measured half a metre behind the live marker) and ratchets every
+   removed cell, so neither a lagging snapshot nor the ring being
+   re-announced on reconnection can repaint cut ground. The card draws
    the eroded segments directly — green for still to edge, white for done —
    shaving only the segment ends within reach of the marker to hide the
    update lag, and the layer clears as a whole when the job ends.

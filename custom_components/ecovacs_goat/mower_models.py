@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
@@ -273,6 +274,37 @@ class MowerLastJob:
         )
 
 
+# How far apart two legs of one task may sit and still be the same job. Only a
+# mid-job recharge separates them, and that was measured at 80 minutes for a
+# full 14% -> 80% top-up, so three hours leaves room to spare.
+JOB_LEG_MAX_GAP_SECONDS = 3 * 60 * 60
+
+
+def continues_task(
+    existing: MowerLastJob | None, task_id: str | None, leg_started_at: datetime
+) -> bool:
+    """Say whether a finished leg belongs to the record already stored.
+
+    The mower's task id alone cannot answer this: ``cleanState.cid`` is reused
+    across jobs — a mow, the edge trim that followed it and the next day's mow
+    all reported cid 122 (observed 2026-09-04). Matching on it alone glued
+    Wednesday's mow onto Friday's and reported the pair as one 49-hour session
+    that had supposedly started two days earlier. So the legs must also touch
+    in time: the stored record ends where the mower parked to recharge, and a
+    continuation resumes from there.
+    """
+    if existing is None or not task_id or existing.task_id != task_id:
+        return False
+    if not existing.started_at or not existing.ended_at:
+        return False
+    try:
+        datetime.fromisoformat(existing.started_at)
+        gap = (leg_started_at - datetime.fromisoformat(existing.ended_at)).total_seconds()
+    except (TypeError, ValueError):
+        return False
+    return 0 <= gap <= JOB_LEG_MAX_GAP_SECONDS
+
+
 @dataclass(frozen=True)
 class MowerStats:
     """Mower statistics."""
@@ -376,6 +408,12 @@ class MowerMapTrace:
     # these cells is erased from the drawn border after every composition —
     # this is the signal the vendor app whitens its ring with in real time.
     border_cut: frozenset[tuple[int, int]] = frozenset()
+    # Where the last cut update ended. The updates are sparse samples of the
+    # cut (a few cells every couple of seconds, the mower drives further in
+    # between), so the next one is bridged to this point along the lap —
+    # otherwise a sliver survives between every two updates and the ring
+    # draws dashed. See map_geometry.trail_cells.
+    border_cut_front: MapPosition | None = None
 
     @property
     def pending_segments(self) -> tuple[tuple[MapPosition, ...], ...]:

@@ -59,6 +59,16 @@ MIN_SHAPE_POINTS = 3
 # Outline provenance markers (see MowerMapInfo.outline_source).
 OUTLINE_SOURCE_MOWER = "mower"
 OUTLINE_SOURCE_COVERAGE = "coverage"
+# Consecutive cut updates further apart than this along the lap (in cells,
+# 5 m on the reference lawn) are not bridged: the mower did not drive that
+# stretch between them.
+TRAIL_BRIDGE_LIMIT_CELLS = 100
+# A cut update this far off the lap (in cells, 60 cm) is not on it — a
+# relocalisation blip, some other shape — and breaks the trail instead.
+TRAIL_SNAP_LIMIT_CELLS = 12
+# A run this short (in cells, 1 m) hemmed in by cut on both sides is what
+# sparse sampling leaves between two updates, not edge still to cut.
+SLIVER_CELLS = 20
 
 
 class DecodedOutline(NamedTuple):
@@ -251,6 +261,9 @@ class TrackRecord(NamedTuple):
     lane_id: str
     segments: tuple[tuple[MapPosition, ...], ...]
     is_chain: bool
+    # Where a chain-coded record starts. A cut update of a single cell has
+    # no shape, yet still says where the mower is (see trail_cells).
+    anchor: MapPosition | None = None
 
 
 def parse_track_record(field: Any, *, step: int = CHAIN_STEP) -> TrackRecord | None:
@@ -285,15 +298,18 @@ def parse_track_record(field: Any, *, step: int = CHAIN_STEP) -> TrackRecord | N
 
     if subtype == "2":
         anchor_text, *chain_parts = rest
-        if "," not in anchor_text or not chain_parts:
+        if "," not in anchor_text:
             return TrackRecord(lane_id, (), True)
         x_text, y_text, *_ = anchor_text.split(",")
         try:
             anchor = MapPosition(x=int(x_text), y=int(y_text))
         except ValueError:
             return None
-        shape = decode_chain_shape(anchor, chain_parts[0], step=step)
-        return TrackRecord(lane_id, (shape,) if len(shape) >= 2 else (), True)
+        chain = chain_parts[0] if chain_parts else ""
+        shape = decode_chain_shape(anchor, chain, step=step)
+        return TrackRecord(
+            lane_id, (shape,) if len(shape) >= 2 else (), True, anchor
+        )
 
     points: list[MapPosition] = []
     for token in rest:
@@ -363,12 +379,12 @@ def carry_forward_track(
     """Decide which remaining-work layer to publish, and what to remember.
 
     ``incoming`` and ``remembered`` are ``(lanes, border, border_template,
-    border_lap_start, border_cut)`` tuples. Only an
+    border_lap_start, border_cut, border_cut_front)`` tuples. Only an
     ``onMapTrack`` push (``from_push``) may move this layer: every other
     publish — grouped refreshes above all — was assembled from a snapshot
     taken seconds earlier and would drag the layer backwards.
 
-    All five travel in the same push, so all five must be carried. Keeping
+    All six travel in the same push, so all six must be carried. Keeping
     only the lanes left the border blanked by every ordinary refresh, and the
     card went on drawing the last loop it happened to catch instead of the
     one still to cut; losing the template would strand compose_border without
@@ -511,6 +527,83 @@ def cut_cells_from_points(
     return frozenset(cells)
 
 
+def trail_cells(
+    reference: tuple,
+    waypoints: list[MapPosition],
+    *,
+    step: int = CHAIN_STEP,
+    closed: bool = False,
+    limit: int = TRAIL_BRIDGE_LIMIT_CELLS,
+) -> frozenset[tuple[int, int]]:
+    """Return the cells of the lap driven between consecutive cut updates.
+
+    Each cut update names a few cells, but the mower drives two to three
+    times that far before the next one, so eroding by the updates alone
+    leaves an uncut sliver between every two of them and the ring comes out
+    dashed all round — observed live 2026-09-04 during the in-mow edge pass,
+    where snapshots stand still for minutes and nothing else closes the
+    gaps (measured on the 2026-09-02 trim capture: 5 cells per update, 14
+    cells driven in between). The mower follows the lap without skipping,
+    so the stretch between one update and the next was cut too.
+
+    ``reference`` is the lap to walk — the announced ring (``closed``) or,
+    without one, the composed remainder's segments. Every waypoint snaps to
+    its nearest reference point (within ``TRAIL_SNAP_LIMIT_CELLS``; a
+    waypoint further off is not on the lap and breaks the trail), and the
+    reference between consecutive snaps is filled — the short way round a
+    closed ring, never across separate segments, and never over more than
+    ``limit`` cells: two updates that far apart came from a drive elsewhere,
+    not along the edge. Cells are dilated like the updates' own, so a lap
+    composed a cell off the reference is still rubbed out.
+    """
+    if len(waypoints) < 2 or not reference:
+        return frozenset()
+    dense = [
+        _densify(segment, step) for segment in reference if len(segment) >= 2
+    ]
+    if not dense:
+        return frozenset()
+    ring = closed and len(dense) == 1
+    snap_limit = (TRAIL_SNAP_LIMIT_CELLS * step) ** 2
+
+    def snap(point: MapPosition) -> tuple[int, int] | None:
+        best: tuple[int, int, int] | None = None
+        for segment_index, points in enumerate(dense):
+            for index, candidate in enumerate(points):
+                distance = (candidate.x - point.x) ** 2 + (
+                    candidate.y - point.y
+                ) ** 2
+                if distance <= snap_limit and (best is None or distance < best[0]):
+                    best = (distance, segment_index, index)
+        return None if best is None else (best[1], best[2])
+
+    driven: list[MapPosition] = []
+    previous = snap(waypoints[0])
+    for waypoint in waypoints[1:]:
+        current = snap(waypoint)
+        if (
+            previous is not None
+            and current is not None
+            and previous[0] == current[0]
+        ):
+            points = dense[current[0]]
+            start, end = previous[1], current[1]
+            if ring:
+                count = len(points)
+                ahead = (end - start) % count
+                back = (start - end) % count
+                if ahead <= back and ahead <= limit:
+                    driven.extend(points[(start + k) % count] for k in range(ahead + 1))
+                elif back < ahead and back <= limit:
+                    driven.extend(points[(start - k) % count] for k in range(back + 1))
+            else:
+                low, high = sorted((start, end))
+                if high - low <= limit:
+                    driven.extend(points[low : high + 1])
+        previous = current
+    return cut_cells_from_points(driven, step=step)
+
+
 def _densify(segment: tuple, step: int) -> list[MapPosition]:
     """Expand a polyline so consecutive points sit at most ``step`` apart.
 
@@ -562,18 +655,28 @@ def erode_border(
     snapshot repainted the cut right side green for the rest of the job) — so
     after every composition, whatever falls in the accumulated cut cells is
     rubbed out. Surviving runs are re-simplified; runs shorter than 2 points
-    are dropped.
+    are dropped, and so is a run of at most ``SLIVER_CELLS`` hemmed in by
+    cut on both sides — the mower never leaves a metre of edge standing
+    between two cut stretches, that is a sampling gap between updates. A
+    short run at a segment's own end is kept: that end is the lap's front
+    or its start, not a hole.
     """
     if not segments or not cut:
         return segments
     eroded: list[tuple[MapPosition, ...]] = []
     for segment in segments:
         run: list[MapPosition] = []
+        # Whether the run began right after a cut point rather than at the
+        # segment's start.
+        after_cut = False
         for point in _densify(segment, step):
             if (point.x // step, point.y // step) in cut:
-                if len(run) >= 2:
+                if len(run) >= 2 and not (
+                    after_cut and len(run) - 1 <= SLIVER_CELLS
+                ):
                     eroded.append(drop_collinear(run))
                 run = []
+                after_cut = True
             else:
                 run.append(point)
         if len(run) >= 2:

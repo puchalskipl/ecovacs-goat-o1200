@@ -58,6 +58,7 @@ from .mower_models import (
     MowerMapInfo,
     MowerMapTrace,
     MowerState,
+    continues_task,
     standstill_bucket,
 )
 from .state_merge import changed_field_names, merge_refreshed_state
@@ -870,10 +871,11 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
                         border_template=None,
                         border_lap_start=None,
                         border_cut=frozenset(),
+                        border_cut_front=None,
                     ),
                 ),
             )
-            self._remembered_track = ({}, None, None, None, frozenset())
+            self._remembered_track = ({}, None, None, None, frozenset(), None)
         if job_plan_completed(previous, data):
             # The job just closed: the remaining-work layer is history. An
             # end-of-job ring re-announcement would otherwise repaint the
@@ -889,10 +891,11 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
                         border_template=None,
                         border_lap_start=None,
                         border_cut=frozenset(),
+                        border_cut_front=None,
                     ),
                 ),
             )
-            self._remembered_track = ({}, (), None, None, frozenset())
+            self._remembered_track = ({}, (), None, None, frozenset(), None)
         data = self._carry_forward_track(previous, data)
         data = self._carry_forward_map_geometry(previous, data)
         data = self._maybe_update_outline(data)
@@ -927,6 +930,7 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
             data.map.trace.border_template,
             data.map.trace.border_lap_start,
             data.map.trace.border_cut,
+            data.map.trace.border_cut_front,
         )
         published, self._remembered_track = carry_forward_track(
             self._remembered_track,
@@ -936,7 +940,7 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
         )
         if published == incoming:
             return data
-        lanes, border, template, lap_start, cut = published
+        lanes, border, template, lap_start, cut, cut_front = published
         return replace(
             data,
             map=replace(
@@ -948,6 +952,7 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
                     border_template=template,
                     border_lap_start=lap_start,
                     border_cut=cut,
+                    border_cut_front=cut_front,
                 ),
             ),
         )
@@ -1087,24 +1092,17 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
         )
         started_at = job["started_at"]
         existing = data.last_jobs.get(kind)
-        if (
-            existing is not None
-            and existing.task_id
-            and existing.task_id == job["task_id"]
-            and existing.started_at
-        ):
+        merged_leg = continues_task(existing, job["task_id"], started_at)
+        if merged_leg:
             # A recharge split this task into legs: the job began at the first
             # of them, and the reported time covers everything since — the
             # break included, which is what "how long did it take" means.
-            started_at = min(started_at, dt_util.parse_datetime(existing.started_at))
+            first_leg_start = dt_util.parse_datetime(existing.started_at)
+            if first_leg_start is not None:
+                started_at = min(started_at, first_leg_start)
         # Legs of one task carry their own standstill; the record reports the
         # whole task, so they add up (unlike the area, which the mower already
         # reports cumulatively).
-        merged_leg = (
-            existing is not None
-            and existing.task_id
-            and existing.task_id == job["task_id"]
-        )
         blocked = job.get("blocked_seconds", 0.0) / 60
         charging = job.get("charging_seconds", 0.0) / 60
         if merged_leg:
@@ -1114,9 +1112,13 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
             kind=kind,
             started_at=started_at.isoformat(),
             ended_at=ended_at.isoformat(),
+            # Within one task the mower's area counter is cumulative, so the
+            # earlier leg's figure is a floor rather than something to add.
+            # Across tasks it is nothing of the sort: carrying it over let a
+            # ten-minute run claim the whole lawn.
             mowed_area=max(
                 round(job["mowed_peak"], 1),
-                (existing.mowed_area or 0.0) if existing else 0.0,
+                (existing.mowed_area or 0.0) if merged_leg else 0.0,
             ),
             duration_minutes=round(
                 (ended_at - started_at).total_seconds() / 60, 1
