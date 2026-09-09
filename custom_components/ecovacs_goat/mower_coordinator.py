@@ -58,6 +58,7 @@ from .mower_models import (
     MowerMapInfo,
     MowerMapTrace,
     MowerState,
+    carried_over_area,
     continues_task,
     standstill_bucket,
 )
@@ -1036,6 +1037,10 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
                     "started_at": dt_util.utcnow(),
                     "task_id": data.task_id,
                     "mowed_peak": 0.0,
+                    # What the session area counter reads right now still
+                    # belongs to the job that just ended — see
+                    # ``carried_over_area``.
+                    "area_carryover": data.stats.area,
                     "blocked_seconds": 0.0,
                     "charging_seconds": 0.0,
                     "sampled_at": dt_util.utcnow(),
@@ -1055,7 +1060,10 @@ class MowerCoordinator(DataUpdateCoordinator[MowerState]):
                     job["kind"] = data.clean_type
                 if data.task_id:
                     job["task_id"] = data.task_id
-                if data.stats.area:
+                if data.stats.area and not carried_over_area(
+                    job.get("area_carryover"), data.stats.area
+                ):
+                    job["area_carryover"] = None
                     job["mowed_peak"] = max(
                         job["mowed_peak"], data.stats.area / 10000
                     )

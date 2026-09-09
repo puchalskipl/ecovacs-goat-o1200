@@ -338,6 +338,40 @@ def test_a_reused_task_id_does_not_glue_two_days_of_mowing_together() -> None:
     )
 
 
+def test_an_edge_trim_does_not_inherit_the_area_of_the_mow_before_it() -> None:
+    """Exercises mower_models.carried_over_area.
+
+    Replays 2026-09-09: the mow ended at 13:48:15 on 252.7 m2 and the edge
+    trim started 0.2 s later, but the mower kept reporting 2526725 cm2 until
+    13:48:32 — 18 seconds during which the peak latched the whole lawn. The
+    trim itself only ever reached 15.7 m2, and that is what the record has to
+    say.
+    """
+    from custom_components.ecovacs_goat.mower_models import carried_over_area
+
+    stale = 2526725  # cm2, the mow that just finished
+    peak = 0.0
+    carryover = stale
+    # Two stale readings, the mower's zeroing, then the trim's own progress.
+    for area in (stale, stale, 0, 225, 900, 156525):
+        if area and not carried_over_area(carryover, area):
+            carryover = None
+            peak = max(peak, area / 10000)
+
+    assert round(peak, 1) == 15.7
+
+    # A job first seen mid-run (restart with nothing to restore) starts from
+    # whatever the counter reads and loses at most that one sample.
+    peak = 0.0
+    carryover = 1205000
+    for area in (1205000, 1206500, 1210000):
+        if area and not carried_over_area(carryover, area):
+            carryover = None
+            peak = max(peak, area / 10000)
+
+    assert round(peak, 1) == 121.0
+
+
 def test_a_restart_mid_job_must_not_reset_the_clock() -> None:
     """The in-flight job is persisted, so its start survives a restart."""
     from datetime import datetime, timezone

@@ -175,6 +175,24 @@ def standstill_bucket(*, mowing: bool, blocked: bool, charging: bool) -> str | N
     return None
 
 
+def carried_over_area(carryover: int | None, area: int | None) -> bool:
+    """Say whether an area sample still belongs to the job that just ended.
+
+    The mower zeroes its session area counter a little *after* a new task
+    starts, not when it starts — measured 18 s into an edge trim and 32 s into
+    a mow on 2026-09-09. Until then it keeps reporting the finished job's
+    total, unchanged. Reading that as the new job's progress recorded a
+    14-minute edge trim as 252.7 m2 — the whole lawn instead of its 15.7 m2
+    border strip — because the peak latched the stale figure in the first
+    seconds and never came back down.
+
+    Equality rather than "at least" on purpose: it releases on the first
+    genuinely new reading, so a job first seen mid-run (a restart with no
+    stored job to restore) loses one sample instead of its whole area.
+    """
+    return carryover is not None and area == carryover
+
+
 def active_job_payload(job: dict[str, Any]) -> dict[str, Any]:
     """Return the persistable form of the job currently being tracked.
 
@@ -193,6 +211,7 @@ def active_job_payload(job: dict[str, Any]) -> dict[str, Any]:
         "started_at": started_at.isoformat() if started_at else None,
         "task_id": job.get("task_id"),
         "mowed_peak": float(job.get("mowed_peak") or 0.0),
+        "area_carryover": job.get("area_carryover"),
         "blocked_seconds": float(job.get("blocked_seconds") or 0.0),
         "charging_seconds": float(job.get("charging_seconds") or 0.0),
     }
@@ -212,6 +231,7 @@ def active_job_from_payload(
         "started_at": started_at,
         "task_id": stored.get("task_id"),
         "mowed_peak": float(stored.get("mowed_peak") or 0.0),
+        "area_carryover": stored.get("area_carryover"),
         "blocked_seconds": float(stored.get("blocked_seconds") or 0.0),
         "charging_seconds": float(stored.get("charging_seconds") or 0.0),
     }
