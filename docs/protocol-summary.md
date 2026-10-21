@@ -94,7 +94,7 @@ in `index` order *before* decoding — decoding a part on its own fails. A
 mowing plan (~7 kB, 180+ lane fields) always ships as `serial: "2"`; the
 much smaller edge-lap loop fits in one message, which is why an integration
 that ignores multi-chunk pushes shows the plan for edge trims but never for
-a mow (diagnosed 2026-08-31 after two sessions with zero visible plan).
+a mow.
 
 Each field is `<type>;<subtype>;<id>;<data>`:
 
@@ -172,6 +172,17 @@ Dead ends, so nobody retries them:
   answered `code 0, msg ok` and **silently ignored**. A stop typed `auto`
   cannot end a `borderrotate` job; the type of the running job must be sent.
 - `setChildLock` is accepted but ignored by the O1200 firmware.
+- The per-session area counter (`onStats.mowedArea`) resets **late**: for
+  the first tens of seconds of a new job (measured 18 s for an edge trim, 32 s
+  for a mow) the mower still reports the previous job's total. Taken at face
+  value this recorded an edge trim as the whole lawn. The integration
+  remembers the reading at job start and ignores samples equal to it until
+  the first different one arrives.
+- `cleanState.cid` does **not** identify a job: consecutive mows and edge
+  trims over several days all reported the same value. Legs of one job (split
+  by a recharge break) therefore cannot be joined on the id alone — they must
+  also be contiguous in time. Only a recharge separates legs, so a gap above
+  3 h means a new job.
 - When a start is blocked (rain / animal protection), the mower accepts the
   command, drives for ~5 s, and returns on its own — that is not an error.
 - The MQTT broker's certificate does not pass standard verification; the
